@@ -1,8 +1,9 @@
 package org.sb.jgdrive;
 
 import java.io.IOException;
+import java.util.List;
 
 public interface Cmd
 {
-    void exec() throws IOException, IllegalStateException;
+    void exec(Driver driver, List<String> opts) throws IOException, IllegalStateException;
 }

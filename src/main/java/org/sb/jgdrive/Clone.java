@@ -4,16 +4,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.logging.Logger;
 
 import com.google.api.client.auth.oauth2.Credential;
-import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
-import com.google.api.client.http.HttpTransport;
-import com.google.api.client.json.JsonFactory;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.File;
 
@@ -22,21 +18,24 @@ public class Clone
     private static final Logger log = Logger.getLogger(Clone.class.getPackage().getName());
     private final Driver driver;
     
-    public Clone(Path home, boolean simulation) throws IOException, IllegalStateException, GeneralSecurityException
+    public Clone(Path home, boolean simulation) throws IOException, IllegalStateException
     {
-        Path jgdrive = home.resolve(".jgdrive");
-        if(!Files.exists(jgdrive)) throw new IllegalStateException("The path '" + jgdrive.getFileName() 
-                                        + "' already exists in '" + jgdrive.getParent() + "', please remove it first.");
-        Files.createDirectory(jgdrive);
-        final HttpTransport httpTransport = GoogleNetHttpTransport.newTrustedTransport();
-        final JsonFactory jfac = Driver.jfac;
-        CredHelper credHelper = new CredHelper(jgdrive, httpTransport, jfac);
-        Credential cred = credHelper.authorize();
-        driver = new Driver(home, 
-                new Drive.Builder(httpTransport, jfac, cred).setApplicationName(Driver.appName).build(), simulation);
+        CredHelper credHelper = CredHelper.makeCredHelper(home);
+        Credential cred = credHelper.get().orElseGet(() -> {
+                                                            try
+                                                            {
+                                                                return credHelper.authorize();
+                                                            }
+                                                            catch(IOException io)
+                                                            {
+                                                                throw new IORtException(io);
+                                                            }
+                                                        });
+        driver = new Driver(home, new Drive.Builder(credHelper.httpTransport, 
+                                    credHelper.jfac, cred).setApplicationName(Driver.appName).build(), simulation);
     }
     
-    public void exec() throws IOException
+    public void exec(final List<String> opts) throws IOException
     {
         ArrayList<Map<File, Path>> maps = new ArrayList<>();
         
@@ -51,6 +50,10 @@ public class Clone
         maps.stream().forEach(map -> 
             map.entrySet().stream().forEach(e -> 
                 ri.getLocalPath(e.getKey().getId()).ifPresent(lp -> moveFile(e.getValue(), home.resolve(lp)))));
+        
+        ri.setLastRevisionId(driver.getLargestChangeId());
+        ri.setLastSyncTime();
+        driver.saveRemoteIndex();
     }
     
     private boolean isDir(File f)
@@ -75,5 +78,10 @@ public class Clone
         {
             throw new IORtException(e);
         }
+    }
+
+    public Driver getDriver()
+    {
+        return driver;
     }    
 }

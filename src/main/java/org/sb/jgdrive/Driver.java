@@ -1,6 +1,5 @@
 package org.sb.jgdrive;
 
-import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -52,32 +51,50 @@ public class Driver
     static final JsonFactory jfac = JacksonFactory.getDefaultInstance();
     static final String appName = "jgdrive";
     private final Path home;
-    private final RemoteIndex ri;
-    private Drive drive;
+    private final Supplier<RemoteIndex> ri;
+    private final Supplier<Drive> drive;
     private final boolean simulation;
     
-    public Driver(Path home, boolean simulation) throws FileNotFoundException, IOException
+    public Driver(Path home, boolean simulation) throws IllegalStateException
     {
         this.home = home;
-        Path riPath = riPath();
-        if (!Files.exists(riPath))
-            throw new IllegalStateException("Could not find an index at " + riPath.toAbsolutePath());
 
-        log.fine("Reading index from " + riPath);
-        ri = jfac.fromReader(new FileReader(riPath.toFile()), RemoteIndex.class);
+        ri = CachingSupplier.wrap(() -> {
+            try
+            {
+                Path riPath = riPath();
+                if (!Files.exists(riPath))
+                    throw new IllegalStateException("Could not find an index at " + riPath.toAbsolutePath());
+                log.fine("Reading index from " + riPath);
+                return jfac.fromReader(new FileReader(riPath.toFile()), RemoteIndex.class);
+            }
+            catch (IOException e)
+            {
+                throw new IORtException(e);
+            }
+        });
+        
+        drive = CachingSupplier.wrap(() -> getDrive());
         this.simulation = simulation;
     }
 
     public Driver(Path home, Drive drive, boolean simulation) throws IllegalStateException, IOException
     {
         this.home = home;
-        this.drive = drive;
+        this.drive = () -> drive;
         Path riPath = jgdrive();
         if (!Files.exists(riPath))
             Files.createDirectories(riPath);
         else if(!Files.isDirectory(riPath))
             throw new IllegalStateException("The path " + riPath + " must be a directory.");
-        this.ri = new RemoteIndex(getLargestChangeId(), Stream.empty());
+        this.ri = CachingSupplier.wrap(() -> {   try
+                            {
+                                return new RemoteIndex(getLargestChangeId(), Stream.empty());
+                            }
+                            catch (IOException e)
+                            {
+                                throw new IORtException(e);
+                            }});
         this.simulation = simulation;
     }
 
@@ -88,13 +105,13 @@ public class Driver
     
     public RemoteIndex getRemoteIndex()
     {
-        return ri;
+        return ri.get();
     }
     
     public RemoteChanges getRemoteChanges(Long lastChangeId, Optional<FileTime> modifiedDtm) throws IOException
     {
         Stream<Change> stream = Stream.empty();
-        Changes.List list = getDrive().changes().list()
+        Changes.List list = drive.get().changes().list()
                         .setStartChangeId(lastChangeId + 1)
                         .setIncludeDeleted(true)
                         .setIncludeSubscribed(false)
@@ -113,25 +130,24 @@ public class Driver
         return new RemoteChanges(stream, id);
     }
 
-    private Drive getDrive() throws IOException
+    private Drive getDrive() throws IORtException
     {
-        if(drive == null)
-        synchronized (this)
+        try
         {
-            try
-            {
-                HttpTransport httpTransport = GoogleNetHttpTransport.newTrustedTransport();
-                CredHelper credHelper = new CredHelper(jgdrive(), httpTransport, jfac);
-                Credential cred = credHelper.get()
-                                    .orElseThrow(() -> new IOException("Did not find credentials from " + jgdrive()));
-                drive = new Drive.Builder(httpTransport, jfac,  cred).setApplicationName(appName).build();
-            }
-            catch(GeneralSecurityException ge)
-            {
-               throw new RuntimeException(ge); 
-            }
+            HttpTransport httpTransport = GoogleNetHttpTransport.newTrustedTransport();
+            CredHelper credHelper = new CredHelper(jgdrive(), httpTransport, jfac);
+            Credential cred = credHelper.get()
+                                .orElseThrow(() -> new IOException("Did not find credentials from " + jgdrive()));
+            return new Drive.Builder(httpTransport, jfac,  cred).setApplicationName(appName).build();
         }
-        return drive;
+        catch(GeneralSecurityException ge)
+        {
+           throw new RuntimeException(ge); 
+        }
+        catch(IOException io)
+        {
+            throw new IORtException(io);
+        }
     }
 
     public void saveRemoteIndex() throws IOException
@@ -157,7 +173,7 @@ public class Driver
     public Stream<Path> getLocalModifiedFiles() throws IOException
     {
         Path idxDir = jgdrive();
-        FileTime lastSyncTime = ri.getLastSyncTime();
+        FileTime lastSyncTime = getRemoteIndex().getLastSyncTime();
         return Files.find(home, Integer.MAX_VALUE, 
                 (p, a) -> !p.startsWith(idxDir) 
                             && a.isRegularFile()
@@ -165,15 +181,29 @@ public class Driver
                     .map(p -> home.relativize(p));
     }
 
+    public Map<File, Path> downloadByFileIds(Stream<String> fileIds) throws IORtException
+    {
+        return downloadFiles(fileIds.<File>map(fileId -> {
+            try
+            {
+                return drive.get().files().get(fileId).execute();
+            }
+            catch(IOException e)
+            {
+                throw new IORtException(e);
+            }
+        }));
+    }
+    
     public Map<File, Path> downloadFiles(Stream<File> files) throws IORtException
     {
         return 
         files.map(f ->  {try
                          {
-                            Path path = Files.createTempFile("jgdrive-", ".tmp");
+                            Path path = Files.createTempFile("jgdrive-", "-" + f.getTitle());
                             log.fine("Downloading " + f.getId() + " to " + path + " ....");
                             // uses alt=media query parameter to request content
-                            ChecksumInputStream remStream = new ChecksumInputStream(getDrive().files().get(f.getId()).executeMediaAsInputStream());
+                            ChecksumInputStream remStream = new ChecksumInputStream(drive.get().files().get(f.getId()).executeMediaAsInputStream());
                             long size = Files.copy(remStream, path, StandardCopyOption.REPLACE_EXISTING);
                             remStream.close();
                             if(!f.getMd5Checksum().equals(remStream.getMd5HexChecksum()))
@@ -200,7 +230,7 @@ public class Driver
                 ChecksumInputStream fileStream = new ChecksumInputStream(Files.newInputStream(localPath, StandardOpenOption.READ));
                 InputStreamContent mediaContent = new InputStreamContent(mime(localPath), fileStream);
                 // Send the request to the API.
-                File file = getDrive().files().update(fileId, null, mediaContent).setFields(FILE_ATTRS).execute();
+                File file = drive.get().files().update(fileId, null, mediaContent).setFields(FILE_ATTRS).execute();
                 if(fileStream.getMd5HexChecksum().equalsIgnoreCase(file.getMd5Checksum()))
                     throw new IORtException("Failed to verify md5 checksum for id=" + file.getId() + ", path=" + localPath
                                         + ", expected=" + fileStream.getMd5HexChecksum() + ", found=" + file.getMd5Checksum());
@@ -233,7 +263,7 @@ public class Driver
             if(!simulation)
             try
             {
-                File file = getDrive().files().insert(body).setFields(FILE_ATTRS).execute();
+                File file = drive.get().files().insert(body).setFields(FILE_ATTRS).execute();
                 pathFileMap.put(localDir, file);
             }
             catch (IOException e)
@@ -265,7 +295,7 @@ public class Driver
         {
             ChecksumInputStream fileStream = new ChecksumInputStream(Files.newInputStream(localPath, StandardOpenOption.READ));
             InputStreamContent mediaContent = new InputStreamContent(body.getMimeType(), fileStream);
-            File file = getDrive().files().insert(body, mediaContent).setFields(FILE_ATTRS).execute();
+            File file = drive.get().files().insert(body, mediaContent).setFields(FILE_ATTRS).execute();
             if(fileStream.getMd5HexChecksum().equalsIgnoreCase(file.getMd5Checksum()))
                 throw new IORtException("Failed to verify md5 checksum for id=" + file.getId() + ", path=" + localPath
                                     + ", expected=" + fileStream.getMd5HexChecksum() + ", found=" + file.getMd5Checksum());
@@ -284,7 +314,7 @@ public class Driver
         fileIds.forEach(fileId -> {try
         {
             log.info("Trashing remote file: " + fileId);
-            if(!simulation)getDrive().files().trash(fileId).setFields(FILE_ATTRS).execute();
+            if(!simulation)drive.get().files().trash(fileId).setFields(FILE_ATTRS).execute();
         }
         catch (IOException e)
         {
@@ -308,7 +338,7 @@ public class Driver
     public long getLargestChangeId() throws IOException
     {
         //setFields("largestChangeId,name,user,rootFolderId,languageCode")
-        return getDrive().about().get().setFields("largestChangeId").execute().getLargestChangeId();
+        return drive.get().about().get().setFields("largestChangeId").execute().getLargestChangeId();
     }
     
     public Stream<File> getAllFiles2() throws IOException
@@ -316,7 +346,7 @@ public class Driver
         return StreamSupport.stream(
         new Spliterators.AbstractSpliterator<File>(Long.MAX_VALUE, Spliterator.SIZED)
         {
-            final Drive.Files.List request = getDrive().files().list()
+            final Drive.Files.List request = drive.get().files().list()
                     .setQ("trashed = false and 'me' in owners")
                     .setFields("nextPageToken,items(" + FILE_ATTRS + ")").setMaxResults(400);
             FileList list = null;
@@ -363,7 +393,7 @@ public class Driver
         return StreamSupport.stream(
         new Spliterators.AbstractSpliterator<Supplier<List<File>>>(Long.MAX_VALUE, Spliterator.SIZED)
         {
-            final Drive.Files.List request = getDrive().files().list()
+            final Drive.Files.List request = drive.get().files().list()
                     .setQ("trashed = false and 'me' in owners")
                     .setFields("nextPageToken,items(" + FILE_ATTRS + ")")
                     .setMaxResults(400);
@@ -411,7 +441,7 @@ public class Driver
         files.forEach(f -> {
             try
             {
-                getDrive().files().patch(f.getId(), f).setFields(FILE_ATTRS).execute();
+                drive.get().files().patch(f.getId(), f).setFields(FILE_ATTRS).execute();
             }
             catch (IOException e)
             {

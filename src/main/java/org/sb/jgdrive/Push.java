@@ -12,7 +12,6 @@ import java.security.NoSuchAlgorithmException;
 import java.util.AbstractMap.SimpleImmutableEntry;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,17 +25,11 @@ import java.util.stream.Stream;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.ParentReference;
 
-public class Push
+public class Push implements Cmd
 {
     private static final Logger log = Logger.getLogger(Push.class.getPackage().getName());
-    private final Driver driver;
-    
-    public Push(Driver driver)
-    {
-        this.driver = driver;
-    }
 
-    public void exec() throws IOException, IllegalStateException
+    public void exec(final Driver driver, final List<String> opts) throws IOException, IllegalStateException
     {   
         RemoteIndex ri = driver.getRemoteIndex();
         Path home = driver.getHome();
@@ -60,23 +53,25 @@ public class Push
                 Map<Path, String> deletedPaths = ri.getFileId(ri.localPaths()
                         .filter(p -> Files.notExists(home.resolve(p), LinkOption.NOFOLLOW_LINKS)).collect(Collectors.toSet()));
                 
-                Map<Path, String> movedFiles = detectMovedFiles(home, newFiles, deletedPaths);
+                Map<Path, Path> movedFilesFromTo = detectMovedFiles(home, newFiles, deletedPaths);
                 
                 Map<Path, Optional<String>> pathParentIdMap = getParentIds(sp -> ri.getFileId(sp), newFiles);
                 Stream<Path> newDirs = pathParentIdMap.entrySet().stream().filter(e -> !newFiles.contains(e.getKey()))
                         .map(e -> e.getKey());
                 pathFileMap.putAll(driver.mkdirs(newDirs, p -> pathParentIdMap.get(p)));
                 
-                movedFiles.entrySet().stream().map(es -> {
+                driver.patchFiles(
+                movedFilesFromTo.entrySet().stream().map(es -> {
                     File f = new File();
-                    Path p = es.getKey();
-                    f.setId(es.getValue());
+                    Path p = es.getValue();
+                    f.setId(deletedPaths.remove(es.getKey()));
                     f.setTitle(p.getFileName().toString());
                     f.setParents(Collections.singletonList(new ParentReference().setId(
                                     pathParentIdMap.get(p).orElseGet(() -> pathFileMap.get(p.getParent()).getId()))));
                     return f;
-                });
-                newFiles.removeAll(movedFiles.keySet());
+                }));
+                
+                newFiles.removeAll(movedFilesFromTo.values());
                 
                 newFiles.stream().parallel().forEach(p -> 
                         pathFileMap.put(p, driver.insertFile(home.resolve(p), p.getParent() != null ? 
@@ -101,11 +96,11 @@ public class Push
     
     }
     
-    private Map<Path, String> detectMovedFiles(Path home, Set<Path> newFiles, Map<Path, String> deletedPaths)
+    static Map<Path, Path> detectMovedFiles(Path home, Set<Path> newFiles, Map<Path, String> deletedPaths)
     {
         final Function<Path, byte[]> md5HashFunc = new Function<Path, byte[]>()
         {
-            private final HashMap<Path, byte[]> pathMd5Map = new HashMap<>();
+            private final ConcurrentHashMap<Path, byte[]> pathMd5Map = new ConcurrentHashMap<>();
             @Override
             public byte[] apply(Path path)
             {
@@ -137,16 +132,13 @@ public class Push
             }
         };
         
-        List<SimpleImmutableEntry<Path, Path>> movedFilesFromTo =   
-            newFiles.stream().map(path -> 
+        return   
+            newFiles.stream().parallel().map(path -> 
                 deletedPaths.keySet().stream().filter(p -> !Files.isDirectory(home.resolve(p)) &&
                                                             Arrays.equals(md5HashFunc.apply(home.resolve(path)), 
                                                                                     md5HashFunc.apply(home.resolve(p))))
                                  .findFirst().<SimpleImmutableEntry<Path, Path>>map(p -> new SimpleImmutableEntry<Path, Path>(p, path)))
-                         .filter(sie -> sie.isPresent()).map(sie -> sie.get()).collect(Collectors.toList());
-        
-        return movedFilesFromTo.stream().map(sie -> new SimpleImmutableEntry<Path, String>(sie.getValue(), 
-                                                                                    deletedPaths.remove(sie.getKey())))
+                         .filter(sie -> sie.isPresent()).map(sie -> sie.get())
                                 .collect(Collectors.toMap(sie -> sie.getKey(), sie -> sie.getValue()));
     }
 

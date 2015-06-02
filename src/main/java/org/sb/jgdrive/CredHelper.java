@@ -12,6 +12,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.GeneralSecurityException;
 import java.util.Collections;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 import com.google.api.client.auth.oauth2.Credential;
@@ -19,6 +20,7 @@ import com.google.api.client.googleapis.auth.oauth2.GoogleAuthorizationCodeFlow;
 import com.google.api.client.googleapis.auth.oauth2.GoogleAuthorizationCodeTokenRequest;
 import com.google.api.client.googleapis.auth.oauth2.GoogleClientSecrets;
 import com.google.api.client.googleapis.auth.oauth2.GoogleTokenResponse;
+import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.util.store.FileDataStoreFactory;
@@ -30,13 +32,13 @@ class CredHelper
     private static final Logger log = Logger.getLogger(CredHelper.class.getPackage().getName());
     private static final String redirURI = "urn:ietf:wg:oauth:2.0:oob";
     private final Path userToken;
-    private final HttpTransport httpTransport;
-    private final JsonFactory jfac;
+    final HttpTransport httpTransport;
+    final JsonFactory jfac;
     private final GoogleClientSecrets clientSecrets;
     
     CredHelper(Path jgdrive, HttpTransport httpTransport, JsonFactory jfac) throws IOException
     {
-        if(Files.notExists(jgdrive)) throw new FileNotFoundException("The path "  + jgdrive + " does not exist.");
+        if(Files.notExists(jgdrive)) throw new FileNotFoundException("The directory "  + jgdrive + " does not exist.");
         this.httpTransport = httpTransport;
         this.jfac = jfac;
         userToken = jgdrive.resolve("usertoken");
@@ -57,7 +59,7 @@ class CredHelper
         clientSecrets = GoogleClientSecrets.load(jfac, new FileReader(clientSecretsFile.toFile()));
     }
 
-    Credential authorize() throws GeneralSecurityException, IOException
+    Credential authorize() throws IOException
     {
         GoogleAuthorizationCodeFlow flow = getFlow(true);
         System.out.println("Please open the following URL in your browser, login, accept and then type the authorization code shown on the page:");
@@ -68,8 +70,7 @@ class CredHelper
                         clientSecrets.getDetails().getClientId(), clientSecrets.getDetails().getClientSecret(),
                         code, redirURI).execute();
         log.fine(() -> "Got token response:" + response);
-        Credential cred = flow.createAndStoreCredential(response, userID);
-        return cred;
+        return flow.createAndStoreCredential(response, userID);
     }
 
     private GoogleAuthorizationCodeFlow getFlow(boolean force) throws IOException
@@ -88,11 +89,54 @@ class CredHelper
         return Optional.ofNullable(flow.loadCredential(userID));
     }
 
+    Optional<Credential> reauthorize() throws IORtException, IOException
+    {
+        Supplier<String> resp = () -> { 
+            System.out.println("Please confirm that you want to authenticate again (y/n):");
+            try
+            {
+                return readLine();
+            }
+            catch (IOException e)
+            {
+                throw new IORtException(e);
+            }
+        };
+        
+        if(Files.notExists(userToken) || resp.get().startsWith("y")) return Optional.of(authorize());
+        else 
+        {
+            System.out.println("Continuing with existing credentials ...");
+            return get();
+        }
+    }
+    
     private static String readLine() throws IOException
     {
         BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
         String code = br.readLine();
         br.close();
         return code != null ? code.trim() : "";
+    }
+
+    static CredHelper makeCredHelper(Path home) throws IOException, IllegalStateException
+    {
+        Path jgdrive = home.resolve(".jgdrive");
+        
+        if(Files.notExists(jgdrive)) Files.createDirectory(jgdrive);
+        else if(!Files.isDirectory(jgdrive))
+            throw new IllegalStateException("The path '" + jgdrive.getFileName() 
+                    + "' already exists in '" + jgdrive.getParent() + "', but is not a directory.");
+        
+        try
+        {
+            final HttpTransport httpTransport = GoogleNetHttpTransport.newTrustedTransport();
+            final JsonFactory jfac = Driver.jfac;
+            return new CredHelper(jgdrive, httpTransport, jfac);
+        }
+        catch (GeneralSecurityException e)
+        {
+            throw new RuntimeException(e);
+        }
     }
 }

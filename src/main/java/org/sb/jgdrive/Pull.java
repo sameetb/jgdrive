@@ -16,17 +16,11 @@ import java.util.stream.Stream;
 
 import com.google.api.services.drive.model.File;
 
-public class Pull
+public class Pull implements Cmd
 {
     private static final Logger log = Logger.getLogger(Pull.class.getPackage().getName());
-    private final Driver driver;
-    
-    public Pull(Driver driver)
-    {
-        this.driver = driver;
-    }
 
-    public void exec() throws IOException, IllegalStateException
+    public void exec(final Driver driver, final List<String> opts) throws IOException, IllegalStateException
     {
         RemoteIndex ri = driver.getRemoteIndex();
         RemoteChanges remChanges = driver.getRemoteChanges(ri.getLastRevisionId(), Optional.of(ri.getLastSyncTime()));
