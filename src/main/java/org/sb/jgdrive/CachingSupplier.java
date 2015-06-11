@@ -1,14 +1,25 @@
 package org.sb.jgdrive;
 
-import java.util.Optional;
 import java.util.function.Supplier;
+
+import com.google.api.client.util.Key;
 
 public class CachingSupplier<T> implements Supplier<T>
 {
-    private Optional<T> val;
+    @Key
+    private T val;
     private Supplier<T> sup;
     
+    public CachingSupplier()
+    {
+    }
+
     public static <T> Supplier<T> wrap(Supplier<T> sup)
+    {
+        return wrap2(sup);
+    }
+
+    public static <T> CachingSupplier<T> wrap2(Supplier<T> sup)
     {
         return new CachingSupplier<T>(sup);
     }
@@ -21,17 +32,17 @@ public class CachingSupplier<T> implements Supplier<T>
     @Override
     public T get()
     {
-        Optional<T> tmp = val;
-        if(tmp == null)
+        Supplier<T> tmp = sup;
+        if(tmp != null)
         synchronized (this)
         {
-            tmp = val;
-            if(tmp == null)
+            tmp = sup;
+            if(tmp != null)
             {
-                val = tmp = Optional.ofNullable(sup.get());
-                sup = null;
+                val = tmp.get();
+                tmp = sup = null;
             }
         }
-        return tmp.orElse(null);
+        return val;
     }
 }

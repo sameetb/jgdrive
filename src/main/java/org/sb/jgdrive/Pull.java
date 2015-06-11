@@ -1,18 +1,26 @@
 package org.sb.jgdrive;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.ByteChannel;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.AbstractMap.SimpleImmutableEntry;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import javax.xml.bind.DatatypeConverter;
 
 import com.google.api.services.drive.model.File;
 
@@ -29,50 +37,81 @@ public class Pull implements Cmd
             log.info("Already up to date at revision: " + ri.getLastRevisionId() + ". Nothing to pull.");
             return;
         }
-        log.info("Updating to revision: " + remChanges.getLargestChangeId());
+        log.info("Pulling to revision: " + remChanges.getLargestChangeId());
         Path home = driver.getHome();
-        Set<Path> localChanges = driver.getLocalModifiedFiles().collect(Collectors.toSet());
-        if(!localChanges.isEmpty())
-        {
-            Set<Path> conflicts = remChanges.getChanges().stream().map(ch -> ri.getLocalPath(ch.getFile().getId()))
-                    .filter(op -> op.map(p -> localChanges.contains(p)).orElse(false)).map(op -> op.get())
-                    .collect(Collectors.toSet());
-            if (!conflicts.isEmpty())
-            {
-                throw new IllegalStateException("Found following local changes that conflict with remote changes. "
-                        + "Please delete or move these local files: " + conflicts);
-            }
-        }
+        LocalChanges lc = new LocalChanges(driver);
+        ri.setLastSyncTime();
         
-        Map<File, Path> remModifiedFiles = driver.downloadFiles(remChanges.getModifiedFiles().parallel());
+        Set<String> changedIds = remChanges.getChanges().stream().map(ch -> ch.getFile().getId()).collect(Collectors.toSet());
         
-
-        List<SimpleImmutableEntry<File, Optional<Path>>> deletePaths = 
-                Stream.concat(remChanges.getDeletedFiles(), remChanges.getDeletedDirs())
-                        .map(f -> new SimpleImmutableEntry<>(f, ri.getLocalPath(f.getId()))).collect(Collectors.toList());
-        ri.remove(deletePaths.stream().map(e -> e.getKey().getId()));
+        Set<Path> conflicts = Stream.of(lc.getModifiedFiles().entrySet(), 
+                                                    lc.getDeletedPaths().entrySet(), lc.getMovedFilesFromTo().keySet())
+                               .flatMap(es -> es.stream())
+                               .filter(e -> changedIds.contains(e.getValue()))
+                               .map(e -> e.getKey()).collect(Collectors.toSet());
         
-        ri.add(Stream.concat(remChanges.getModifiedDirs(), remModifiedFiles.keySet().stream()));
+        
+        /*Set<Path> conflicts = remChanges.getChanges().stream().map(ch -> ri.getLocalPath(ch.getFile().getId()))
+                .filter(op -> op.map(p -> localChanges.contains(p)).orElse(false)).map(op -> op.get())*/
+                
+        if (!conflicts.isEmpty())
+            throw new IllegalStateException("Found following local changes that conflict with remote changes. "
+                    + "Please delete or move these local files: " + conflicts);
+        
+        List<Path> deletePaths = ri.remove(Stream.concat(remChanges.getDeletedFiles(), remChanges.getDeletedDirs()).map(f -> f.getId()));
+        
+        Map<File, Path> newFilePathMap = ri.add(Stream.concat(remChanges.getModifiedDirs(), remChanges.getModifiedFiles()));
+        if(!Collections.disjoint(newFilePathMap.values(), lc.getNewFiles()))
+            throw new IllegalStateException("Some new files conflict with upstream changes" + conflicts);
+            
+        Stream<Entry<File, Path>> remModifiedFiles = driver.downloadFiles(remChanges.getModifiedFiles()
+                                                    .filter(f -> isModified(f.getMd5Checksum(), home.resolve(newFilePathMap.get(f)))).parallel());
+        
         log.fine("Updating directories ...");
-        remChanges.getModifiedDirs().forEach(f -> ri.getLocalPath(f.getId()).ifPresent(p -> createDir(home.resolve(p))));
+        remChanges.getModifiedDirs().forEach(f -> Optional.ofNullable(newFilePathMap.get(f)).map(p -> createDir(home.resolve(p))));
         
         log.fine("Updating files ...");
-        remModifiedFiles.entrySet().stream().forEach(e -> 
-                ri.getLocalPath(e.getKey().getId()).ifPresent(lp -> moveFile(e.getValue(), home.resolve(lp))));
+        remModifiedFiles.forEach(e -> moveFile(e.getValue(), 
+                    home.resolve(Optional.ofNullable(newFilePathMap.get(e.getKey())).orElseThrow(
+                            () -> new IllegalStateException("Remote file " + e.getKey() + " was not added to index.")))));
 
         log.fine("Deleting files ...");
-        deletePaths.stream().map(e -> e.getValue()).forEach(op -> op.map(p -> deletePath(home.resolve(p))));
+        deletePaths.stream().forEach(p -> deletePath(home.resolve(p)));
         
         ri.setLastRevisionId(remChanges.getLargestChangeId());
         log.info("Updated to revision: " + ri.getLastRevisionId());
+        driver.saveLocalChanges(lc.getModifiedFiles().keySet());
         driver.saveRemoteIndex();
     }
     
+    private boolean isModified(String checkSum, Path path)
+    {
+        try
+        {
+            if(Files.notExists(path)) return true;
+            MessageDigest md5 = MessageDigest.getInstance("MD5");
+            ByteChannel bc = Files.newByteChannel(path, StandardOpenOption.READ);
+            ByteBuffer bb = ByteBuffer.allocate(2048);
+            while(bc.read(bb) != -1)
+            {
+                bb.flip();
+                md5.update(bb);
+                bb.clear();
+            }
+            bc.close();
+            return !checkSum.equalsIgnoreCase(DatatypeConverter.printHexBinary(md5.digest()));
+        }
+        catch (NoSuchAlgorithmException | IOException e)
+        {
+            throw new RuntimeException("Failed to generate MD5 hash of " + path, e);
+        }
+    }
+
     private boolean deletePath(Path p)
     {
         try
         {
-            log.info("Deleting local " + p);
+            log.info("Deleting local '" + p + "'");
             return Files.deleteIfExists(p);
         }
         catch (IOException e)
@@ -85,7 +124,7 @@ public class Pull implements Cmd
     {
         try
         {
-            log.info("Updating local file " + lp + " with " + tmpPath);
+            log.info("Updating local '" + lp + "'");
             Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
         }
         catch (IOException e)
@@ -94,15 +133,17 @@ public class Pull implements Cmd
         }
     }
 
-    private void createDir(Path p)
+    private boolean createDir(Path p)
     {
         try
         {
             if(!Files.exists(p, LinkOption.NOFOLLOW_LINKS))
             {
-                log.info("Creating local directory " + p);
+                log.info("Adding local '" + p + "'");
                 Files.createDirectories(p);
+                return true;
             }
+            return false;
         }
         catch (IOException e)
         {

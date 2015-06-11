@@ -4,9 +4,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.logging.Logger;
 
 import com.google.api.client.auth.oauth2.Credential;
@@ -37,42 +38,40 @@ public class Clone
     
     public void exec(final List<String> opts) throws IOException
     {
-        ArrayList<Map<File, Path>> maps = new ArrayList<>();
+        final boolean isDown = !opts.contains("no-download");
+
+        Path home = driver.getHome();
         
         RemoteIndex ri = driver.getRemoteIndex();
+        ri.add(driver.getAllDirs());
+        
         driver.getAllFiles().forEach(s -> 
         {
             List<File> files = s.get();
-            ri.add(files.stream());
-            maps.add(driver.downloadFiles(files.stream().filter(f -> !isDir(f)).parallel()));
+            Map<File, Path> mapPath = ri.add(files.stream());
+            if(isDown) 
+                driver.downloadFiles(files.stream().parallel()).forEach(e -> 
+                    Optional.ofNullable(mapPath.get(e.getKey())).map(dst -> moveFile(e.getValue(), home.resolve(dst))));
         });
-        Path home = driver.getHome();
-        maps.stream().forEach(map -> 
-            map.entrySet().stream().forEach(e -> 
-                ri.getLocalPath(e.getKey().getId()).ifPresent(lp -> moveFile(e.getValue(), home.resolve(lp)))));
         
         ri.setLastRevisionId(driver.getLargestChangeId());
         ri.setLastSyncTime();
         driver.saveRemoteIndex();
+        log.info("Cloned to revision: " + ri.getLastRevisionId());
     }
     
-    private boolean isDir(File f)
-    {
-        return f.getMimeType().equals(Driver.MIME_TYPE_DIR);
-    }    
-    
-    private static void moveFile(Path tmpPath, Path lp)
+    private static Path moveFile(Path tmpPath, Path lp)
     {
         try
         {
             Path parent = lp.getParent();
             if(Files.notExists(parent))
             {
-                log.info("Creating local directory " + parent);
+                log.info("created: " + parent);
                 Files.createDirectories(parent);
             }
-            log.info("Creating local file " + lp + " with " + tmpPath);
-            Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
+            log.info("created: " + lp);
+            return Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
         }
         catch (IOException e)
         {
@@ -84,4 +83,9 @@ public class Clone
     {
         return driver;
     }    
+    
+    public static List<String> help(String name)
+    {
+        return Collections.singletonList(name + "\t not implemented");
+    }
 }

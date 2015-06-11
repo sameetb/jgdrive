@@ -7,12 +7,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import com.google.api.services.drive.model.File;
 
 public class Reset implements Cmd
 {
@@ -20,34 +17,33 @@ public class Reset implements Cmd
 
     public void exec(final Driver driver, final List<String> opts) throws IOException, IllegalStateException
     {
-        RemoteIndex ri = driver.getRemoteIndex();
         Path home = driver.getHome();
-        Set<Path> localChanges = driver.getLocalModifiedFiles().collect(Collectors.toSet());
+        LocalChanges lc = new LocalChanges(driver);
 
-        Map<Path, String> map = ri.getFileId(localChanges);
-        
-        Set<Path> newFiles = localChanges.stream().filter(p -> !map.containsKey(p)).collect(Collectors.toSet());
-        Map<Path, String> deletedPaths = ri.getFileId(ri.localPaths()
-                .filter(p -> Files.notExists(home.resolve(p), LinkOption.NOFOLLOW_LINKS)).collect(Collectors.toSet()));
-        
-        Map<Path, Path> movedFilesFromTo = Push.detectMovedFiles(home, newFiles, deletedPaths);
-        
-        newFiles.removeAll(movedFilesFromTo.values());
-        deletedPaths.keySet().removeAll(movedFilesFromTo.keySet());
-        
-        Map<File, Path> resetFiles = driver.downloadByFileIds(
-                                Stream.concat(map.values().stream(), deletedPaths.values().stream()).parallel());
+        Map<Path, String> deletedPaths = lc.getDeletedPaths();
+        Map<Path, String> modifiedFiles = lc.getModifiedFiles();
+        Map<String, Path> resetFiles = driver.downloadByFileIds(
+                                            Stream.concat(modifiedFiles.values().stream(), deletedPaths.values().stream()))
+                                       .collect(Collectors.toMap(e -> e.getKey().getId(), e -> e.getValue()));
         
         log.fine("Resetting files ...");
-        resetFiles.entrySet().stream().forEach(e -> 
-                ri.getLocalPath(e.getKey().getId()).ifPresent(lp -> moveFile(e.getValue(), home.resolve(lp))));
+        Stream.of(modifiedFiles.entrySet(), deletedPaths.entrySet()).flatMap(es -> es.stream()).forEach(e -> 
+            {
+                Path tmpSrc = resetFiles.get(e.getValue());
+                if(tmpSrc == null) //it is a dir
+                    createDir(home.resolve(e.getKey()));
+                else
+                    moveFile(tmpSrc, home.resolve(e.getKey()));
+                
+            });
+        driver.clearLocalChanges();
         
-        movedFilesFromTo.entrySet().stream().forEach(e -> moveFile(home.resolve(e.getValue()), home.resolve(e.getKey())));
+        lc.getMovedFilesFromTo().entrySet().stream().forEach(e -> moveFile(home.resolve(e.getValue()), home.resolve(e.getKey().getKey())));
         
-        newFiles.stream().map(p -> home.resolve(p)).forEach(p -> {
+        lc.getNewFiles().stream().map(p -> home.resolve(p)).forEach(p -> {
             try
             {
-                log.info("Deleting 'new' file " + p);
+                log.info("Deleting '" + p + "'");
                 Files.deleteIfExists(p);
             }
             catch(IOException e)
@@ -61,7 +57,13 @@ public class Reset implements Cmd
     {
         try
         {
-            log.info("Resetting local file " + lp + " with " + tmpPath);
+            Path parent = lp.getParent();
+            if(Files.notExists(parent))
+            {
+                log.info("Restoring '" + parent + "'");
+                Files.createDirectories(parent);
+            }
+            log.info("Restoring '" + lp + "'");
             Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
         }
         catch (IOException e)
@@ -69,4 +71,22 @@ public class Reset implements Cmd
             throw new IORtException(e);
         }
     }
+    
+    private boolean createDir(Path p)
+    {
+        try
+        {
+            if(!Files.exists(p, LinkOption.NOFOLLOW_LINKS))
+            {
+                log.info("Restoring '" + p + "'");
+                Files.createDirectories(p);
+                return true;
+            }
+            return false;
+        }
+        catch (IOException e)
+        {
+            throw new IORtException(e);
+        }
+    }    
 }

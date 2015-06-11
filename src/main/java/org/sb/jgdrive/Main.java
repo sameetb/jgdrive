@@ -1,12 +1,18 @@
 package org.sb.jgdrive;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.AbstractMap.SimpleImmutableEntry;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.LogManager;
@@ -15,9 +21,11 @@ import java.util.stream.Stream;
 
 public class Main
 {
+    private static Supplier<Logger> log = CachingSupplier.wrap(() -> Logger.getLogger(Main.class.getPackage().getName()));
+    private static final String[] cmds = {"clone", "pull", "push", "status", "reset", "login", "info"};
+    
     public static void main(String[] args)
     {
-        Supplier<Logger> log = () -> Logger.getLogger(Main.class.getPackage().getName());
         try
         {
             exec(args);
@@ -29,34 +37,38 @@ public class Main
         catch(Exception io)
         {
             log.get().log(Level.SEVERE, "", io);
-        }
+        }   
+        LogManager.getLogManager().reset();
         System.exit(-1);
     }
     
-    public static void exec(String[] args) throws IOException
+    public static void exec(String[] args) throws IOException, IORtException
     {
-        final Supplier<Stream<String>> sargs = () -> Stream.of(args).filter(arg -> arg.length() > 0).map(arg -> arg.toLowerCase()).distinct();
-        final Supplier<Stream<String>> cmds = () -> sargs.get().filter(arg -> !arg.startsWith("-"));
-        final Supplier<Stream<String>> flags = () -> sargs.get().filter(arg -> arg.startsWith("-")).map(arg -> arg.substring(1));
+        final LinkedList<Entry<String, List<String>>> cmds = parseArgs(args);
+        final List<String> flags = cmds.removeFirst().getValue();
 
-        initLogging(booleanFlag(flags, "debug"));
+        Set<String> boolFlags = Cmd.booleanFlags(flags.stream());
         
-        if(booleanFlag(flags, "help"))
+        if(boolFlags.contains("help"))
         {
             help();
             return;
         }
+        initLogging(boolFlags.contains("debug"));
         
-        final boolean simulation = booleanFlag(flags, "simulation");
+        final boolean simulation = boolFlags.contains("simulation");
         
-        final Path home = nvpFlag(flags, "home").map(p -> Paths.get(p).toAbsolutePath())
+        if(simulation) log.get().info("Running in simulation mode, no changes will be on remote drive.");
+        
+        Map<String, String>  nvpFlags = Cmd.nvpFlags(flags.stream());
+        final Path home = Optional.ofNullable(nvpFlags.get("home")).map(p -> Paths.get(p).toAbsolutePath())
                                                         .orElseGet(() -> Paths.get(".").toAbsolutePath().getParent());
         
-        final Driver driver = cmds.get().filter(cmd -> "clone".equals(cmd)).findAny().map(cmd -> {
+        final Driver driver = cmds.stream().filter(cmd -> "clone".equals(cmd.getKey())).findAny().map(cmd -> {
                                     try
                                     {
                                         Clone clone = new Clone(home, simulation);
-                                        clone.exec(Collections.emptyList());
+                                        clone.exec(cmd.getValue());
                                         return clone.getDriver();
                                     }
                                     catch(IOException e)
@@ -64,13 +76,13 @@ public class Main
                                         throw new IORtException(e); 
                                     }
                                 }).orElseGet(() -> new Driver(home, simulation));
-        //cmds.
         
-        cmds.get().filter(cmd -> !"clone".equals(cmd)).map(cmd -> makeCmd(cmd))
+        cmds.stream().filter(cmd -> !"clone".equals(cmd.getKey()))
+            .map(cmd -> makeCmd(cmd.getKey()).<Entry<Cmd, List<String>>>map(co -> new SimpleImmutableEntry<>(co, cmd.getValue())))
             .forEach(ocmd -> ocmd.ifPresent( cmd -> {   
                                 try
                                 {
-                                    cmd.exec(driver, Collections.emptyList());
+                                    cmd.getKey().exec(driver, cmd.getValue());
                                 }
                                 catch(IOException e)
                                 {
@@ -80,19 +92,26 @@ public class Main
 
     private static void help()
     {
-        System.out.println("Not implemented yet!");
-        
-    }
-
-    private static Boolean booleanFlag(final Supplier<Stream<String>> flags, String flagName)
-    {
-        return flags.get().filter(flag -> flag.equals(flagName)).findFirst().map(flag -> true).orElse(false);
-    }
-
-    private static Optional<String> nvpFlag(final Supplier<Stream<String>> flags, String flagName)
-    {
-        return flags.get().filter(flag -> flag.startsWith(flagName + "=")).findFirst()
-                        .map(flag -> flag.replace(flagName + "=", ""));
+        String[] msgs = {
+                "jgdrive 0.0.1, Google drive file sychronizer.",
+                "usage: jgdrive [--home=<dir>] [--simulation] [--help] [--debug] [<command> [--<arg>]*]...",
+                "",
+                "options:",
+                "\t--home=<dir>\tthe directory where the drive files are (to be) checked out.",
+                "\t\t\tif not specified, the current directory is assumed to be the home.",
+                "\t--simulation\tDry run, no changes will be made on remote drive.",
+                "\t--debug\t application logs  at 'fine' verbosity level",
+                "",
+                "If no commands are specified, it defaults to 'pull push'.",
+                "",
+                "supported commands:"
+                };
+            Stream.concat(
+                    Stream.of(msgs),
+                    Stream.of(cmds).flatMap(c -> makeCmd(c).<List<String>>map(cmd -> cmd.help(c))
+                                                            .orElseGet(() -> Clone.help(c)).stream())
+                                   .map(s -> "\t" + s))
+                .forEach(s -> System.out.println(s));
     }
 
     private static Optional<Cmd> makeCmd(String cmd)
@@ -109,7 +128,7 @@ public class Main
         }
         catch (ClassNotFoundException e)
         {
-            System.err.println("Unsupported command: " + cmd);
+            log.get().info("Unsupported command: " + cmd);
             return Optional.empty();
         }
         catch (InstantiationException | IllegalAccessException e)
@@ -120,8 +139,9 @@ public class Main
     
     private static void initLogging(boolean debug) throws IOException
     {
-        InputStream props = Main.class.getClassLoader().getResourceAsStream("logging.properties");
-        if(props != null)
+        InputStream props;
+        if(System.getProperty("java.util.logging.config.file") == null &&
+                (props = Main.class.getClassLoader().getResourceAsStream("logging.properties")) != null)
         {
             LogManager.getLogManager().readConfiguration(props);
             if(debug)
@@ -129,6 +149,25 @@ public class Main
                             .getLogger(Main.class.getPackage().getName())).ifPresent(log -> log.setLevel(Level.FINE));
         }
         else
-            System.err.println("Could not find 'logging.properties' in classpath");
+            System.err.println("Logging system property is set or could not find 'logging.properties' in classpath");
+    }
+    
+    private static LinkedList<Entry<String, List<String>>> parseArgs(String[] args)
+    {
+        LinkedList<Entry<String, List<String>>> cmds = new LinkedList<>();
+        cmds.add(new SimpleImmutableEntry<>("", new ArrayList<>()));
+        Stream.of(args).filter(arg -> arg.length() > 0)
+        .forEach(arg -> 
+        {
+            Entry<String, List<String>> e = cmds.getLast();
+            if(arg.startsWith("--")) e.getValue().add(arg.substring(2));
+            else cmds.add(new SimpleImmutableEntry<>(arg.toLowerCase(), new ArrayList<>()));
+        });
+        if(cmds.size() < 2)
+        {
+            cmds.add(new SimpleImmutableEntry<>("pull", Collections.emptyList()));
+            cmds.add(new SimpleImmutableEntry<>("push", Collections.emptyList()));
+        }
+        return cmds;
     }
 }

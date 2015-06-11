@@ -10,14 +10,19 @@ import javax.xml.bind.DatatypeConverter;
 
 public class ChecksumInputStream extends FilterInputStream
 {
-    private String md5HexChecksum;
-    private final MessageDigest md5;
+    private String mdHexChecksum;
+    private final MessageDigest md;
     protected ChecksumInputStream(InputStream in)
+    {
+        this("MD5", in);
+    }
+
+    protected ChecksumInputStream(String algo, InputStream in)
     {
         super(in);
         try
         {
-            md5 = MessageDigest.getInstance("MD5");
+            md = MessageDigest.getInstance(algo);
         }
         catch (NoSuchAlgorithmException e)
         {
@@ -29,7 +34,7 @@ public class ChecksumInputStream extends FilterInputStream
     public int read() throws IOException
     {
         int r = super.read();
-        if(r != -1) md5.update((byte)r);
+        if(r != -1) md.update((byte)r);
         return r;
     }
     
@@ -37,7 +42,7 @@ public class ChecksumInputStream extends FilterInputStream
     public int read(byte[] b, int off, int len) throws IOException
     {
         int i = super.read(b, off, len);
-        if(i != -1) md5.update(b, off, i);
+        if(i != -1) md.update(b, off, i);
         return i;
     }
     
@@ -45,18 +50,18 @@ public class ChecksumInputStream extends FilterInputStream
     public synchronized void reset() throws IOException
     {
         super.reset();
-        md5.reset();
+        md.reset();
     }
 
     @Override
     public void close() throws IOException
     {
         super.close();
-        md5HexChecksum = DatatypeConverter.printHexBinary(md5.digest());
+        if(mdHexChecksum == null) mdHexChecksum = DatatypeConverter.printHexBinary(md.digest()).toLowerCase();
     }
 
-    public String getMd5HexChecksum()
+    public String getHexChecksum()
     {
-        return md5HexChecksum;
+        return mdHexChecksum;
     }
 }

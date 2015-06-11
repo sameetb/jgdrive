@@ -1,6 +1,6 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>org.sb.</groupId>
+  <groupId>org.sb</groupId>
   <artifactId>jgdrive</artifactId>
   <version>0.0.1-SNAPSHOT</version>
   <dependencies>
@@ -38,6 +38,9 @@
                     <goals>
                         <goal>test-jar</goal>
                     </goals>
+                    <configuration>
+                        <skipIfEmpty>true</skipIfEmpty>
+                    </configuration>
                 </execution>
             </executions>
             <configuration>
@@ -76,8 +79,10 @@
                   <id>jgdrive</id>
                 </program>
               </programs>
+              <assembleDirectory>${project.build.directory}/dist</assembleDirectory>
               <repositoryLayout>flat</repositoryLayout>
               <repositoryName>libs</repositoryName>
+              <useWildcardClassPath>true</useWildcardClassPath>
             </configuration>
         </plugin>        
     </plugins>

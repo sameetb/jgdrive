@@ -1,16 +1,10 @@
 package org.sb.jgdrive;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
 import java.util.Date;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Status implements Cmd
@@ -20,31 +14,32 @@ public class Status implements Cmd
     public void exec(final Driver driver, final List<String> opts) throws IOException, IllegalStateException
     {
         RemoteIndex ri = driver.getRemoteIndex();
-        Path home = driver.getHome();
-        Set<Path> localChanges = driver.getLocalModifiedFiles().collect(Collectors.toSet());
+        LocalChanges lc = new LocalChanges(driver);
 
-        Map<Path, String> localChangeMap = ri.getFileId(localChanges);
+        Stream<String> output = 
+        Stream.concat(Stream.concat(Stream.concat(lc.getModifiedFiles().keySet().stream().map(p -> "modified: " + p),
+                                                                        lc.getNewFiles().stream().map(p -> "added: " + p)), 
+                                                  lc.getDeletedPaths().keySet().stream().map(p -> "deleted: " + p)),
+                     lc.getMovedFilesFromTo().entrySet().stream().map(es -> "moved: '" + es.getKey().getKey() + "' to '" + es.getValue() + "'"))
+             .map(str -> "local " + str);
         
-        Set<Path> newFiles = localChanges.stream().filter(p -> !localChangeMap.containsKey(p)).collect(Collectors.toSet());
-        Map<Path, String> deletedPaths = ri.getFileId(ri.localPaths()
-                .filter(p -> Files.notExists(home.resolve(p), LinkOption.NOFOLLOW_LINKS)).collect(Collectors.toSet()));
+        String sep = System.lineSeparator();
+        log.info(mkString("Local changes after '" + new Date(ri.getLastSyncTime().toMillis()) + "' (" + ri.getLastSyncTime() + "):", output, sep));
         
-        Map<Path, Path> movedFilesFromTo = Push.detectMovedFiles(home, newFiles, deletedPaths);
-        
-        newFiles.removeAll(movedFilesFromTo.values());
-        deletedPaths.keySet().removeAll(movedFilesFromTo.keySet());
+        if(!opts.contains("local-only"))
+        {
+            RemoteChanges remCh = driver.getRemoteChanges(ri.getLastRevisionId(), Optional.of(ri.getLastSyncTime()));
+            output = Stream.concat(
+                    Stream.concat(remCh.getModifiedDirs(), remCh.getModifiedFiles()).map(f -> "modified: " + ri.getLocalPath(f.getId())),
+                    Stream.concat(remCh.getDeletedDirs(), remCh.getDeletedFiles()).map(f -> "deleted: " + ri.getLocalPath(f.getId())))
+                    .map(str -> "remote " + str);
+            log.info(mkString("Remote changes after change-id " + ri.getLastRevisionId() + ":", output, sep));
+        }
+    }
 
-        System.out.println("Local changes after '" + new Date(ri.getLastSyncTime().toMillis()) + "' (" + ri.getLastSyncTime() + "):");
-        localChangeMap.keySet().stream().forEach(p -> System.out.println("modified: " + p));
-        newFiles.stream().forEach(p -> System.out.println("added: " + p));
-        deletedPaths.keySet().stream().forEach(p -> System.out.println("deleted: " + p));
-        movedFilesFromTo.entrySet().stream().forEach(es -> System.out.println("moved: " + es.getKey() + " to " + es.getValue()));
-        
-        RemoteChanges remCh = driver.getRemoteChanges(ri.getLastRevisionId(), Optional.of(ri.getLastSyncTime()));
-        System.out.println("Remote changes after change-id " + ri.getLastRevisionId() + ":");
-        Stream.concat(remCh.getModifiedDirs(), remCh.getModifiedFiles()).map(f -> ri.getLocalPath(f.getId()))
-                                                                    .forEach(p -> System.out.println("modified: " + p));
-        Stream.concat(remCh.getDeletedDirs(), remCh.getDeletedFiles()).map(f -> ri.getLocalPath(f.getId()))
-                                                                    .forEach(p -> System.out.println("deleted: " + p));
+    private String mkString(String base, Stream<String> msgs, String sep)
+    {
+        return msgs.reduce(new StringBuilder(base), (sb, s2) -> sb.append(sep).append(s2), 
+                (sb1, sb2) -> sb1.append(sep).append(sb2)).toString();
     }
 }
