@@ -31,6 +31,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
@@ -59,6 +60,7 @@ public class Driver
 {
     static final String MIME_TYPE_DIR = "application/vnd.google-apps.folder";
     private static final String FILE_ATTRS = "id,title,parents(id),version,mimeType,modifiedDate,md5Checksum,labels(trashed)";
+    private static final Pattern[] ignores = Stream.of("\\.~.*#", "~\\$.*").map(Pattern::compile).toArray(Pattern[]::new);
     private static final Logger log = Logger.getLogger(Driver.class.getPackage().getName());
     static final JsonFactory jfac = JacksonFactory.getDefaultInstance();
     static final String appName = "jgdrive";
@@ -196,11 +198,13 @@ public class Driver
         Path idxDir = jgdrive();
         RemoteIndex idx = getRemoteIndex();
         FileTime lastSyncTime = idx.getLastSyncTime();
-        return Stream.concat(li.get().stream().map(s -> Paths.get(s)), Files.find(home, Integer.MAX_VALUE, 
-                (p, a) -> !p.startsWith(idxDir) 
-                            && a.isRegularFile()
-                            && (a.lastModifiedTime().compareTo(lastSyncTime) > 0 || !idx.exists(home.relativize(p))))
-                    .map(p -> home.relativize(p)));
+        return Stream.concat(li.get().stream().map(s -> Paths.get(s)), 
+                Files.find(home, Integer.MAX_VALUE, 
+                    (p, a) -> !p.startsWith(idxDir) 
+                                && Stream.of(ignores).noneMatch(pat -> pat.asPredicate().test(p.getFileName().toString()))
+                                && a.isRegularFile()
+                                && (a.lastModifiedTime().compareTo(lastSyncTime) > 0 || !idx.exists(home.relativize(p))))
+                     .map(p -> home.relativize(p)));
     }
     
     public Stream<Entry<File, Path>> downloadByFileIds(Stream<String> fileIds) throws IORtException, IOException
@@ -617,10 +621,13 @@ public class Driver
     
     private void saveLocalIndex() throws IOException
     {
-        FileWriter fw = new FileWriter(liPath().toFile());
-        JsonGenerator gen = jfac.createJsonGenerator(fw);
-        gen.serialize(li.get());
-        gen.flush();
-        fw.close();
+        if(!simulation)
+        {
+            FileWriter fw = new FileWriter(liPath().toFile());
+            JsonGenerator gen = jfac.createJsonGenerator(fw);
+            gen.serialize(li.get());
+            gen.flush();
+            fw.close();
+        }
     }
 }

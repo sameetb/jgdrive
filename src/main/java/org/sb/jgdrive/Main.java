@@ -145,8 +145,7 @@ public class Main
         {
             LogManager.getLogManager().readConfiguration(props);
             if(debug)
-                Optional.ofNullable(LogManager.getLogManager()
-                            .getLogger(Main.class.getPackage().getName())).ifPresent(log -> log.setLevel(Level.FINE));
+                log.get().setLevel(Level.FINE);
         }
         else
             System.err.println("Logging system property is set or could not find 'logging.properties' in classpath");

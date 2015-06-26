@@ -16,6 +16,7 @@ import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -28,6 +29,8 @@ import com.google.api.services.drive.model.File;
  */
 public class RemoteIndex
 {
+    private static final Logger log = Logger.getLogger(Pull.class.getPackage().getName());
+    
     @Key
     private long lastSyncTimeEpochMillis;
     
@@ -71,7 +74,7 @@ public class RemoteIndex
         @Key("t")
         private String title;
         
-        @Key("p")
+        //@Key("p")
         private String parentId;
         
         public FileEntry()
@@ -82,12 +85,7 @@ public class RemoteIndex
         public FileEntry(File file)
         {
             this.title = file.getTitle();
-            this.parentId = parent(file);
-        }
-
-        static String parent(File file)
-        {
-            return file.getParents().stream().findFirst().map(pr -> pr.getId()).orElse("root");
+            this.parentId = parentId(file);
         }
 
         public FileEntry(String title, String parentId)
@@ -111,7 +109,7 @@ public class RemoteIndex
         @Override
         public String toString()
         {
-            return "FileEntry [title=" + title + ", parentId=" + parentId + "]";
+            return "FileEntry [title=" + title + /*", parentId=" + parentId +*/ "]";
         }
 
         @Override
@@ -119,7 +117,7 @@ public class RemoteIndex
         {
             final int prime = 31;
             int result = 1;
-            result = prime * result + ((parentId == null) ? 0 : parentId.hashCode());
+            //result = prime * result + ((parentId == null) ? 0 : parentId.hashCode());
             result = prime * result + ((title == null) ? 0 : title.hashCode());
             return result;
         }
@@ -134,13 +132,13 @@ public class RemoteIndex
             if (getClass() != obj.getClass())
                 return false;
             FileEntry other = (FileEntry) obj;
-            if (parentId == null)
+            /*if (parentId == null)
             {
                 if (other.parentId != null)
                     return false;
             }
             else if (!parentId.equals(other.parentId))
-                return false;
+                return false;*/
             if (title == null)
             {
                 if (other.title != null)
@@ -162,7 +160,7 @@ public class RemoteIndex
         Map<String, File> addedFiles = files.collect(Collectors.toMap(f -> f.getId(), f -> f));
         Node t = tree.get();
         
-        Set<String> searchIds = addedFiles.values().stream().flatMap(f -> Stream.of(f.getId(), FileEntry.parent(f))).collect(Collectors.toSet());
+        Set<String> searchIds = addedFiles.values().stream().flatMap(f -> Stream.of(f.getId(), parentId(f))).collect(Collectors.toSet());
         
         Map<String, Entry<Node, Path>>  searchRes 
                 = t.find(Paths.get(""), searchIds).collect(Collectors.toMap(eoe -> eoe.getKey(), eoe -> eoe.getValue()));
@@ -178,19 +176,6 @@ public class RemoteIndex
                 searchRes.entrySet().stream().filter(e -> !addedFiles.containsKey(e.getKey()))
                             .collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue()));
 
-        existingFiles.forEach(e -> {
-            Node match = e.getValue().getKey();
-            FileEntry fe = new FileEntry(e.getKey());
-            match.entry = fe;
-            Path matchPath = e.getValue().getValue();
-            if(match.entry.parentId != fe.parentId)
-            {
-                t.find(matchPath.getParent()).map(on -> on.remove(match));
-                existingDirs.get(fe.parentId).getKey().add(match);
-            }
-            filePathMap.put(e.getKey(), matchPath);
-        });
-    
         HashMap<String, Node> remNodes = new HashMap<>();
         newFiles.forEach(f -> {
                     Node node = remNodes.remove(f.getId());
@@ -198,7 +183,7 @@ public class RemoteIndex
                         node = new Node(f.getId(), new FileEntry(f));
                     else 
                         node.entry = new FileEntry(f);
-                    String parId = FileEntry.parent(f);
+                    String parId = parentId(f);
                     Entry<Node, Path> parNode = existingDirs.get(parId);
                     if(parNode != null)
                     {
@@ -226,7 +211,24 @@ public class RemoteIndex
                 });
          if(!remNodes.isEmpty())
             throw new RuntimeException("Could not resolve hierarchy for " + remNodes);
-        
+
+         existingFiles.forEach(e -> {
+             Node match = e.getValue().getKey();
+             File file = e.getKey();
+             FileEntry fe = new FileEntry(file);
+             Path matchPath = e.getValue().getValue();
+             String parId = parentId(file);
+             t.find(matchPath.getParent())
+                 .filter(par -> !par.id.equals(parId))
+                 .ifPresent(par -> 
+                     {
+                         par.remove(match);
+                         existingDirs.get(parId).getKey().add(match);
+                     });
+             match.entry = fe;
+             filePathMap.put(file, matchPath);
+         });
+     
         return filePathMap;
     }
     
@@ -567,7 +569,14 @@ public class RemoteIndex
     
     public boolean exists(Path path)
     {
-        return tree.get().find(path).map(p -> true).orElse(false);
+        boolean ex = tree.get().find(path).map(p -> true).orElse(false);
         //return localPaths().filter(p -> p.equals(path)).findFirst().map(p -> true).orElse(false);
+        if(!ex) log.fine("'" + path + "' does not exist");
+        return ex;
+    }
+
+    static String parentId(File file)
+    {
+        return file.getParents().stream().findFirst().map(pr -> pr.getId()).orElse("root");
     }
 }
