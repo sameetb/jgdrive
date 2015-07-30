@@ -7,12 +7,14 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.AbstractMap.SimpleImmutableEntry;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -34,12 +36,17 @@ public class LocalChanges
     
     public LocalChanges(final Driver driver) throws IOException
     {
+        this(driver, Optional.empty());
+    }
+    
+    public LocalChanges(final Driver driver, Optional<FileTime> fromTime) throws IOException
+    {
         Path home = driver.getHome();
         RemoteIndex ri = driver.getRemoteIndex();
         deletedPaths = ri.localPaths().filter(e -> Files.notExists(home.resolve(e.getKey()), LinkOption.NOFOLLOW_LINKS))
                 .collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue()));
         log.fine(() -> "Found deleted " + deletedPaths.keySet()); 
-        Set<Path> allChangedFiles = driver.getLocalModifiedFiles().collect(Collectors.toSet());
+        Set<Path> allChangedFiles = driver.getLocalModifiedFiles(fromTime).collect(Collectors.toSet());
         if(allChangedFiles.size() > 0)
         {
             modifiedFiles = ri.getFileId(allChangedFiles.stream());

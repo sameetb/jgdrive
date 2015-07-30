@@ -60,15 +60,15 @@ public class Driver
 {
     static final String MIME_TYPE_DIR = "application/vnd.google-apps.folder";
     private static final String FILE_ATTRS = "id,title,parents(id),version,mimeType,modifiedDate,md5Checksum,labels(trashed)";
-    private static final Pattern[] ignores = Stream.of("\\.~.*#", "~\\$.*").map(Pattern::compile).toArray(Pattern[]::new);
     private static final Logger log = Logger.getLogger(Driver.class.getPackage().getName());
     static final JsonFactory jfac = JacksonFactory.getDefaultInstance();
     static final String appName = "jgdrive";
     private final Path home;
     private final Supplier<RemoteIndex> ri;
     private final Supplier<Drive> drive;
-    private final Supplier<HashSet<String>> li;
+    private final Supplier<HashSet<String>> li = makeLocalIndex();
     private final boolean simulation;
+    private final Supplier<Pattern[]> ignores = CachingSupplier.wrap(() -> readIgnores().map(Pattern::compile).toArray(Pattern[]::new));
     
     public Driver(Path home, boolean simulation) throws IllegalStateException
     {
@@ -93,7 +93,6 @@ public class Driver
         
         drive = CachingSupplier.wrap(() -> getDrive());
         this.simulation = simulation;
-        li = makeLocalIndex();
     }
 
     public Driver(Path home, Drive drive, boolean simulation) throws IllegalStateException, IOException
@@ -115,7 +114,6 @@ public class Driver
                                 throw new IORtException(e);
                             }});
         this.simulation = simulation;
-        li = makeLocalIndex();
     }
 
     public Path getHome()
@@ -193,15 +191,16 @@ public class Driver
         return home.resolve(".jgdrive");
     }
     
-    public Stream<Path> getLocalModifiedFiles() throws IOException
+    public Stream<Path> getLocalModifiedFiles(Optional<FileTime> fromTime) throws IOException
     {
         Path idxDir = jgdrive();
         RemoteIndex idx = getRemoteIndex();
-        FileTime lastSyncTime = idx.getLastSyncTime();
+        FileTime lastSyncTime = fromTime.orElseGet(() -> idx.getLastSyncTime());
+        Pattern[] igns = ignores.get();
         return Stream.concat(li.get().stream().map(s -> Paths.get(s)), 
                 Files.find(home, Integer.MAX_VALUE, 
                     (p, a) -> !p.startsWith(idxDir) 
-                                && Stream.of(ignores).noneMatch(pat -> pat.asPredicate().test(p.getFileName().toString()))
+                                && Stream.of(igns).noneMatch(pat -> pat.asPredicate().test(p.getFileName().toString()))
                                 && a.isRegularFile()
                                 && (a.lastModifiedTime().compareTo(lastSyncTime) > 0 || !idx.exists(home.relativize(p))))
                      .map(p -> home.relativize(p)));
@@ -364,7 +363,7 @@ public class Driver
         final Callback<File> cb = new Callback<File>()
         {
             @Override
-            public void onSuccess(File t, HttpHeaders responseHeaders) throws IOException
+            public void onSuccess(File t, HttpHeaders responseHeaders)
             {
             }
         };
@@ -629,5 +628,21 @@ public class Driver
             gen.flush();
             fw.close();
         }
+    }
+    
+    private Stream<String> readIgnores()
+    {
+        Path jgdrive = jgdrive();
+        Path ignPath = jgdrive.resolve("ignore.txt");
+        if (Files.exists(ignPath))
+            try
+            {
+                return Files.readAllLines(ignPath).stream();
+            }
+            catch (IOException e)
+            {
+                log.log(Level.WARNING, "Failed to read ignores file " + ignPath, e);
+            }
+        return Stream.of("^\\.~.*#$", "^~\\$.*");
     }
 }

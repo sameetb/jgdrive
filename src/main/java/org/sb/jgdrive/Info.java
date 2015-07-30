@@ -19,7 +19,17 @@ public class Info implements Cmd
     {
         Map<String, String> nvpFlags = Cmd.nvpFlags(opts.stream());
         String path = nvpFlags.get("path");
-        if(path == null) throw new IllegalArgumentException("Please specify a 'path' option for the command 'info'");
+        String id = nvpFlags.get("id");
+        if(path != null)
+            printPath(driver, opts, path);
+        else if(id != null)
+            printFile(driver, id);
+        else
+            throw new IllegalArgumentException("Please specify a 'path/id' option for the command 'info'");
+    }
+
+    private void printPath(Driver driver, List<String> opts, String path) throws IOException
+    {
         Map<Path, String> pathFileIdMap = driver.getRemoteIndex().getFileId(Stream.of(Paths.get(path)));
         if(Cmd.booleanFlags(opts.stream()).contains("full"))
         {
@@ -29,7 +39,12 @@ public class Info implements Cmd
         }
         else
             System.out.println(pathFileIdMap);
-
     }
 
+    private void printFile(Driver driver, String id) throws IOException
+    {
+        Map<String, File> fileMap = driver.getFiles(Stream.of(id));
+        System.out.println(fileMap.get(id));
+    }
+    
 }

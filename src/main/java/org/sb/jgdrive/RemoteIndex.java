@@ -59,9 +59,9 @@ public class RemoteIndex
         tree = CachingSupplier.wrap2(() -> new Node(rootFolderId, rootFileEntry()));
     }
 
-    private static FileEntry rootFileEntry()
+    private static File rootFileEntry()
     {
-        return new FileEntry("", null);
+        return new File().setTitle("");
     }
 
     public RemoteIndex()
@@ -180,9 +180,9 @@ public class RemoteIndex
         newFiles.forEach(f -> {
                     Node node = remNodes.remove(f.getId());
                     if(node == null) 
-                        node = new Node(f.getId(), new FileEntry(f));
+                        node = new Node(f.getId(), f);
                     else 
-                        node.entry = new FileEntry(f);
+                        node.setEntry(f);
                     String parId = parentId(f);
                     Entry<Node, Path> parNode = existingDirs.get(parId);
                     if(parNode != null)
@@ -203,7 +203,7 @@ public class RemoteIndex
                                     .filter(os -> os.isPresent()).map(os -> os.get().getKey()).findFirst();
                         if(!parNod.isPresent()) 
                         {
-                            parNod = Optional.of(new Node(parId, new FileEntry("", null)));
+                            parNod = Optional.of(new Node(parId, rootFileEntry()));
                             remNodes.put(parId, parNod.get());
                         }
                         parNod.get().add(node);
@@ -215,7 +215,6 @@ public class RemoteIndex
          existingFiles.forEach(e -> {
              Node match = e.getValue().getKey();
              File file = e.getKey();
-             FileEntry fe = new FileEntry(file);
              Path matchPath = e.getValue().getValue();
              String parId = parentId(file);
              t.find(matchPath.getParent())
@@ -225,7 +224,7 @@ public class RemoteIndex
                          par.remove(match);
                          existingDirs.get(parId).getKey().add(match);
                      });
-             match.entry = fe;
+             match.setEntry(file);
              filePathMap.put(file, matchPath);
          });
      
@@ -276,13 +275,14 @@ public class RemoteIndex
         return paths;
     }
 
-    public void removePaths(Stream<Path> paths)
+    public List<Optional<String>> removePaths(Stream<Path> paths)
     {
         Node t = tree.get();
-        paths.map(p -> new SimpleImmutableEntry<>(t.find(p.getParent()), p.getFileName().toString()))
+        return paths.map(p -> new SimpleImmutableEntry<>(t.find(p.getParent()), p.getFileName().toString()))
              .filter(sie -> sie.getKey().isPresent())
              .map(sie -> new SimpleImmutableEntry<>(sie.getKey().get(), sie.getValue()))
-             .forEach(sie -> sie.getKey().remove(sie.getValue()));
+             .map(sie -> sie.getKey().removeByTitle(sie.getValue()).<String>map(n -> n.id))
+             .collect(Collectors.toList());
     }
     
     
@@ -302,14 +302,14 @@ public class RemoteIndex
 
     public Optional<Path> getLocalPath(String fileId)
     {
-        return getLocalPath(Collections.singleton(fileId)).findFirst().flatMap(oe -> oe.getValue());
+        return getLocalPath(Collections.singleton(fileId)).findFirst().map(oe -> oe.getValue());
         //return Optional.ofNullable(entryById.get(fileId)).map(fe -> fe.getLocalPath(entryById, dirIdPathMapCache));
     }
 
-    public Stream<Entry<String, Optional<Path>>> getLocalPath(Set<String> fileIds)
+    public Stream<Entry<String, Path>> getLocalPath(Set<String> fileIds)
     {
-        return tree.get().find2(Paths.get(""), new HashSet<>(fileIds))
-                    .map(e -> new SimpleImmutableEntry<>(e.getKey(), e.getValue().map(en -> en.getValue())));
+        return tree.get().find(Paths.get(""), new HashSet<>(fileIds))
+                    .map(e -> new SimpleImmutableEntry<>(e.getKey(), e.getValue().getValue()));
         //return Optional.ofNullable(entryById.get(fileId)).map(fe -> fe.getLocalPath(entryById, dirIdPathMapCache));
     }
     
@@ -363,8 +363,11 @@ public class RemoteIndex
         @Key("i")
         private String id;
         
-        @Key("f")
+        //@Key("f")
         private FileEntry entry;
+        
+        @Key("t")
+        private String title;
         
         @Key("es")
         private HashSet<Node> entries;
@@ -374,15 +377,26 @@ public class RemoteIndex
             
         }
         
-        Node(String id, FileEntry entry)
+        void setEntry(File file)
         {
-            this.id = id;
-            this.entry = entry;
+            title = file.getTitle();
         }
 
-        Optional<Node> remove(String id)
+        Node(String id, File entry)
         {
-            Optional<Node> node = getEntries().flatMap(e -> e.stream().filter(ch -> ch.id.equals(id)).findFirst());
+            this.id = id;
+            //this.entry = entry;
+            this.title = entry.getTitle();
+        }
+
+        private String getTitle()
+        {
+            return title;
+        }
+        
+        Optional<Node> removeByTitle(String title)
+        {
+            Optional<Node> node = getEntries().flatMap(e -> e.stream().filter(ch -> ch.getTitle().equals(title)).findFirst());
             node.ifPresent(n -> remove(n));
             return node;
         }
@@ -396,7 +410,7 @@ public class RemoteIndex
         {
             if(entries == null) entries = new HashSet<>();
             if(!entries.add(me))
-                entries.stream().filter(ch -> ch.equals(me)).findFirst().ifPresent(n -> n.entry = me.entry);
+                entries.stream().filter(ch -> ch.equals(me)).findFirst().ifPresent(n -> n.title = me.getTitle());
             return true;
         }
         
@@ -405,7 +419,7 @@ public class RemoteIndex
             int count;
             if(path == null || (count = path.getNameCount()) == 0) return Optional.empty();
             Optional<Node> child = getEntries().flatMap(e -> 
-                                e.stream().filter(ch -> ch.entry.title.equals(path.getName(0).toString())).findFirst());
+                                e.stream().filter(ch -> ch.getTitle().equals(path.getName(0).toString())).findFirst());
             if(count == 1) return child;
             return child.flatMap(ch -> ch.find(path.subpath(1, count)));
         }
@@ -415,7 +429,7 @@ public class RemoteIndex
             int count = paths.getNameCount();
             if(count == 0) return Optional.empty();
             Optional<Node> child = getEntries().flatMap(e -> 
-                                e.stream().filter(ch -> ch.entry.title.equals(paths.getName(0).toString())).findFirst());
+                                e.stream().filter(ch -> ch.getTitle().equals(paths.getName(0).toString())).findFirst());
             if(count == 1) return child;
             return child.flatMap(ch -> ch.find(paths.subpath(1, count)));
         }*/
@@ -427,7 +441,7 @@ public class RemoteIndex
         
         Optional<Entry<Node, Path>> find(Path parent, String fileId)
         {
-            /*Path curr = parent.resolve(entry.title);
+            /*Path curr = parent.resolve(getTitle());
             if(id.equals(fileId))
                 return Optional.of(new SimpleImmutableEntry<>(this, curr));
             
@@ -446,7 +460,7 @@ public class RemoteIndex
 
         Stream<Entry<String, Entry<Node, Path>>> find(Path parent, Set<String> fileIds)
         {
-            Path curr = parent.resolve(entry.title);
+            Path curr = parent.resolve(getTitle());
             Stream<Entry<String, Entry<Node, Path>>> res = fileIds.remove(id) ? 
                 Stream.of(new SimpleImmutableEntry<>(id, new SimpleImmutableEntry<>(this, curr))) : Stream.empty();
             
@@ -455,16 +469,9 @@ public class RemoteIndex
             return Stream.concat(res, entries.stream().flatMap(ch -> ch.find(curr, fileIds)));
         }
         
-        Stream<Entry<String, Optional<Entry<Node, Path>>>> find2(Path parent, Set<String> fileIds)
-        {
-            return Stream.concat(find(parent, fileIds)
-                                    .map(e -> new SimpleImmutableEntry<>(e.getKey(), Optional.of(e.getValue()))), 
-                    fileIds.stream().map(f -> new SimpleImmutableEntry<>(id, Optional.empty())));
-        }
-        
         Stream<Entry<Path, String>> paths(Path parent)
         {
-            Path curr = parent.resolve(entry.title);
+            Path curr = parent.resolve(getTitle());
             return Stream.concat(Stream.of(new SimpleImmutableEntry<>(curr, id)), 
                     getEntries().map(e -> e.stream().<Entry<Path, String>>flatMap(ch -> ch.paths(curr))).orElse(Stream.empty()));
         }
@@ -477,7 +484,7 @@ public class RemoteIndex
 
         Stream<Entry<Node, Path>> nodes(Path parent)
         {
-            Path curr = parent.resolve(entry.title);
+            Path curr = parent.resolve(getTitle());
             return Stream.concat(Stream.of(new SimpleImmutableEntry<>(this, curr)), 
                     getEntries().map(e -> e.stream().<Entry<Node, Path>>flatMap(ch -> ch.nodes(curr))).orElse(Stream.empty()));
         }
@@ -511,10 +518,11 @@ public class RemoteIndex
             return true;
         }
 
+        
         @Override
         public String toString()
         {
-            return "Node [id=" + id + ", entry=" + entry + "]";
+            return "Node [id=" + id + ", title=" + getTitle() + "]";
         }
     }
 
@@ -533,12 +541,12 @@ public class RemoteIndex
             Node me = get(id);
             if(me == null)
             {
-                me = new Node(id, f);
+                me = new Node(id, new File().setTitle(f.title));
                 put(id, me);
                 if(f.parentId != null)
                     Optional.ofNullable(get(f.parentId)).orElseGet(() -> 
                                         addNode(entryById, f.parentId, Optional.ofNullable(entryById.get(f.parentId))
-                                                        .orElseGet(() -> rootFileEntry())))
+                                                        .orElseGet(() -> new FileEntry("", null))))
                             .add(me); 
                 else
                     setRoot(me);
@@ -578,5 +586,10 @@ public class RemoteIndex
     static String parentId(File file)
     {
         return file.getParents().stream().findFirst().map(pr -> pr.getId()).orElse("root");
+    }
+    
+    void syncTitle()
+    {
+        this.tree.get().nodes().filter(n -> n.title == null && n.entry != null).forEach(n -> n.title = n.entry.title);
     }
 }

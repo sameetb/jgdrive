@@ -33,13 +33,12 @@ public class Push implements Cmd
         if(!lc.isEmpty())
         {
             ri.setLastSyncTime();
+            long largestChangeId = driver.getLargestChangeId();
+            if(largestChangeId > ri.getLastRevisionId())
+                throw new IllegalStateException("Remote revision is at: " + largestChangeId + ", local still at: " 
+                            + ri.getLastRevisionId() + ", please pull to update local before pushing.");
             try
             {
-                long largestChangeId = driver.getLargestChangeId();
-                if(largestChangeId > ri.getLastRevisionId())
-                    throw new IllegalStateException("Remote revision is at: " + largestChangeId + ", local still at: " 
-                                + ri.getLastRevisionId() + ", please pull to update local before pushing.");
-                
                 log.info("Pushing local changes to drive");
                 Map<Path, String> modifiedFiles = lc.getModifiedFiles();
                 modifiedFiles.entrySet().stream().parallel().forEach(e -> driver.updateFile(e.getValue(), home.resolve(e.getKey())));
@@ -82,7 +81,7 @@ public class Push implements Cmd
             }
             finally
             {
-                long largestChangeId = driver.getLargestChangeId();
+                largestChangeId = driver.getLargestChangeId();
                 if(largestChangeId > ri.getLastRevisionId())
                 {
                     ri.add(newPathFileMap.values().stream());

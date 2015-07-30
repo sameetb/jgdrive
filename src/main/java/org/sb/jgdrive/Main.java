@@ -148,7 +148,7 @@ public class Main
                 log.get().setLevel(Level.FINE);
         }
         else
-            System.err.println("Logging system property is set or could not find 'logging.properties' in classpath");
+            System.err.println("Java logging config system property is set or could not find 'logging.properties' on classpath");
     }
     
     private static LinkedList<Entry<String, List<String>>> parseArgs(String[] args)
