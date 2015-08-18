@@ -11,6 +11,19 @@ import java.util.stream.Stream;
 
 public interface Cmd
 {
+    default Try<Void, IOException> exec2(Driver driver, List<String> opts)
+    {
+        try
+        {
+            exec(driver, opts);
+            return Try.success((Void)null);
+        }
+        catch(IOException e)
+        {
+            return Try.failure(e);
+        }
+    }
+    
     void exec(Driver driver, List<String> opts) throws IOException, IllegalStateException;
 
     static Set<String> booleanFlags(final Stream<String> flags)

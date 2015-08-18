@@ -90,21 +90,22 @@ public class LocalChanges
         return movedFilesFromTo;
     }
 
-    private static Map<Entry<Path, String>, Path> detectMovedFiles(Driver driver, Path home, Set<Path> newFiles, Map<Path, String> deletedPaths) throws IOException
+    private static Map<Entry<Path, String>, Path> detectMovedFiles(Driver driver, Path home, 
+                                        Set<Path> newFiles, Map<Path, String> deletedPaths) throws IOException
     {
         Map<String, File> idFileMap = driver.getFiles(deletedPaths.values().stream());
-        final Function<Path, String> md5HashFunc = new Function<Path, String>()
+        final Function<Path, String> md5HashFunc = Try.uncheckFunction(new Try.FunctionEx<Path, String, IOException>()
         {
             private final ConcurrentHashMap<Path, byte[]> pathMd5Map = new ConcurrentHashMap<>();
             @Override
-            public String apply(Path path)
+            public String apply(Path path) throws IOException
             {
                 byte[] hash = pathMd5Map.get(path);
                 if(hash == null) pathMd5Map.put(path, hash = md5Hash(path));
                 return DatatypeConverter.printHexBinary(hash).toLowerCase();
             }
             
-            private byte[] md5Hash(Path path)
+            private byte[] md5Hash(Path path) throws IOException
             {
                 try
                 {
@@ -120,12 +121,12 @@ public class LocalChanges
                     bc.close();
                     return md5.digest();
                 }
-                catch (NoSuchAlgorithmException | IOException e)
+                catch (NoSuchAlgorithmException e)
                 {
-                    throw new RuntimeException("Failed to generate MD5 hash of " + path, e);
+                    throw new IOException("Failed to generate MD5 hash of " + path, e);
                 }
             }
-        };
+        });
         
         return   
             newFiles.stream().parallel().map(path -> 

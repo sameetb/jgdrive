@@ -68,15 +68,15 @@ public class Pull implements Cmd
                                                     .filter(f -> isModified(f.getMd5Checksum(), home.resolve(newFilePathMap.get(f)))).parallel());
         
         log.fine("Updating directories ...");
-        remChanges.getModifiedDirs().forEach(f -> Optional.ofNullable(newFilePathMap.get(f)).map(p -> createDir(home.resolve(p))));
+        remChanges.getModifiedDirs().forEach(f -> Optional.ofNullable(newFilePathMap.get(f)).map(Try.uncheckFunction(p -> createDir(home.resolve(p)))));
         
         log.fine("Updating files ...");
-        remModifiedFiles.forEach(e -> moveFile(e.getValue(), 
+        remModifiedFiles.forEach(Try.uncheck(e -> moveFile(e.getValue(), 
                     home.resolve(Optional.ofNullable(newFilePathMap.get(e.getKey())).orElseThrow(
-                            () -> new IllegalStateException("Remote file " + e.getKey() + " was not added to index.")))));
+                            () -> new IllegalStateException("Remote file " + e.getKey() + " was not added to index."))))));
 
         log.fine("Deleting files ...");
-        deletePaths.stream().forEach(p -> deletePath(home.resolve(p)));
+        deletePaths.stream().forEach(Try.uncheck(p -> deletePath(home.resolve(p))));
         
         ri.setLastRevisionId(remChanges.getLargestChangeId());
         log.info("Updated to revision: " + ri.getLastRevisionId());
@@ -107,48 +107,27 @@ public class Pull implements Cmd
         }
     }
 
-    private boolean deletePath(Path p)
+    private boolean deletePath(Path p) throws IOException
     {
-        try
-        {
-            log.info("Deleting local '" + p + "'");
-            return Files.deleteIfExists(p);
-        }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
-        }
+        log.info("Deleting local '" + p + "'");
+        return Files.deleteIfExists(p);
     }
 
-    private void moveFile(Path tmpPath, Path lp)
+    private void moveFile(Path tmpPath, Path lp) throws IOException
     {
-        try
-        {
-            log.info("Updating local '" + lp + "'");
-            Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
-        }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
-        }
+        log.info("Updating local '" + lp + "'");
+        Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
     }
 
-    private boolean createDir(Path p)
+    private boolean createDir(Path p) throws IOException
     {
-        try
+        if(!Files.exists(p, LinkOption.NOFOLLOW_LINKS))
         {
-            if(!Files.exists(p, LinkOption.NOFOLLOW_LINKS))
-            {
-                log.info("Adding local '" + p + "'");
-                Files.createDirectories(p);
-                return true;
-            }
-            return false;
+            log.info("Adding local '" + p + "'");
+            Files.createDirectories(p);
+            return true;
         }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
-        }
+        return false;
     }
     
 }

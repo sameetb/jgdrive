@@ -30,10 +30,6 @@ public class Main
         {
             exec(args);
         }
-        catch(IORtException  io)
-        {
-            log.get().log(Level.SEVERE, "", io.getCause());
-        }
         catch(Exception io)
         {
             log.get().log(Level.SEVERE, "", io);
@@ -42,7 +38,7 @@ public class Main
         System.exit(-1);
     }
     
-    public static void exec(String[] args) throws IOException, IORtException
+    public static void exec(String[] args) throws Exception
     {
         final LinkedList<Entry<String, List<String>>> cmds = parseArgs(args);
         final List<String> flags = cmds.removeFirst().getValue();
@@ -64,32 +60,29 @@ public class Main
         final Path home = Optional.ofNullable(nvpFlags.get("home")).map(p -> Paths.get(p).toAbsolutePath())
                                                         .orElseGet(() -> Paths.get(".").toAbsolutePath().getParent());
         
-        final Driver driver = cmds.stream().filter(cmd -> "clone".equals(cmd.getKey())).findAny().map(cmd -> {
-                                    try
+        final Try<Driver, IOException> driver = cmds.stream().filter(cmd -> "clone".equals(cmd.getKey())).findAny().map(
+                            Try.wrap(cmd ->
                                     {
                                         Clone clone = new Clone(home, simulation);
                                         clone.exec(cmd.getValue());
                                         return clone.getDriver();
-                                    }
-                                    catch(IOException e)
-                                    {
-                                        throw new IORtException(e); 
-                                    }
-                                }).orElseGet(() -> new Driver(home, simulation));
-        
-        cmds.stream().filter(cmd -> !"clone".equals(cmd.getKey()))
-            .map(cmd -> makeCmd(cmd.getKey()).<Entry<Cmd, List<String>>>map(co -> new SimpleImmutableEntry<>(co, cmd.getValue())))
-            .forEach(ocmd -> ocmd.ifPresent( cmd -> {   
-                                try
-                                {
-                                    cmd.getKey().exec(driver, cmd.getValue());
-                                }
-                                catch(IOException e)
-                                {
-                                    throw new IORtException(e); 
-                                }}));
-    }
+                                    }, IOException.class))
+                            .orElseGet(Try.wrap(() -> new Driver(home, simulation), IOException.class));
 
+        cmds.stream().filter(cmd -> !"clone".equals(cmd.getKey()))
+            .map(cmd -> makeCmd(cmd.getKey()).<Entry<Try<Cmd, Exception>, List<String>>>map(tc -> pair(tc, cmd.getValue())))
+            .filter(otc -> otc.isPresent())
+            .map(otc -> otc.get())
+            .map(tsie -> tsie.getKey().flatMap(cmd -> driver.flatMap(dr -> cmd.exec2(dr, tsie.getValue()))))
+            .forEach(Try.uncheck(tsie -> tsie.orElseThrow()));
+
+    }
+    
+    private static <K, V> Entry<K, V> pair(K k, V v)
+    {
+        return new SimpleImmutableEntry<>(k, v);
+    }
+    
     private static void help()
     {
         String[] msgs = {
@@ -108,21 +101,22 @@ public class Main
                 };
             Stream.concat(
                     Stream.of(msgs),
-                    Stream.of(cmds).flatMap(c -> makeCmd(c).<List<String>>map(cmd -> cmd.help(c))
+                    Stream.of(cmds).flatMap(c -> makeCmd(c).map(Try.uncheckFunction(cmd -> cmd.orElseThrow().help(c)))
                                                             .orElseGet(() -> Clone.help(c)).stream())
                                    .map(s -> "\t" + s))
                 .forEach(s -> System.out.println(s));
     }
 
-    private static Optional<Cmd> makeCmd(String cmd)
+    private static Optional<Try<Cmd, Exception>> makeCmd(String cmd)
     {
         String clsNm = Cmd.class.getPackage().getName() + "." + cmd.substring(0, 1).toUpperCase() + cmd.substring(1);
         try
         {
+            @SuppressWarnings("rawtypes")
             Class cmdCls = Class.forName(clsNm);
             if(Cmd.class.isAssignableFrom(cmdCls))
             {
-                return Optional.of((Cmd)cmdCls.newInstance());
+                return Optional.of(Try.success((Cmd)cmdCls.newInstance()));
             }
             return Optional.empty();
         }
@@ -133,7 +127,7 @@ public class Main
         }
         catch (InstantiationException | IllegalAccessException e)
         {
-            throw new RuntimeException(e);
+            return Optional.of(Try.failure(e));
         }
     }
     
@@ -154,18 +148,18 @@ public class Main
     private static LinkedList<Entry<String, List<String>>> parseArgs(String[] args)
     {
         LinkedList<Entry<String, List<String>>> cmds = new LinkedList<>();
-        cmds.add(new SimpleImmutableEntry<>("", new ArrayList<>()));
+        cmds.add(pair("", new ArrayList<>()));
         Stream.of(args).filter(arg -> arg.length() > 0)
         .forEach(arg -> 
         {
             Entry<String, List<String>> e = cmds.getLast();
             if(arg.startsWith("--")) e.getValue().add(arg.substring(2));
-            else cmds.add(new SimpleImmutableEntry<>(arg.toLowerCase(), new ArrayList<>()));
+            else cmds.add(pair(arg.toLowerCase(), new ArrayList<>()));
         });
         if(cmds.size() < 2)
         {
-            cmds.add(new SimpleImmutableEntry<>("pull", Collections.emptyList()));
-            cmds.add(new SimpleImmutableEntry<>("push", Collections.emptyList()));
+            cmds.add(pair("pull", Collections.emptyList()));
+            cmds.add(pair("push", Collections.emptyList()));
         }
         return cmds;
     }

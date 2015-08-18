@@ -26,6 +26,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -70,12 +71,11 @@ public class Driver
     private final boolean simulation;
     private final Supplier<Pattern[]> ignores = CachingSupplier.wrap(() -> readIgnores().map(Pattern::compile).toArray(Pattern[]::new));
     
-    public Driver(Path home, boolean simulation) throws IllegalStateException
+    public Driver(Path home, boolean simulation) throws IllegalStateException, IOException
     {
         this.home = home;
 
-        ri = CachingSupplier.wrap(() -> {
-            try
+        ri = CachingSupplier.wrap(Try.uncheck(() -> 
             {
                 Path riPath = riPath();
                 if (!Files.exists(riPath))
@@ -84,14 +84,9 @@ public class Driver
                 /*FlatRemoteIndex fri = jfac.fromReader(new FileReader(riPath.toFile()), FlatRemoteIndex.class);
                 return new RemoteIndex(fri.lastSyncTimeEpochMillis, fri.lastRevisionId, fri.entryById);*/
                 return jfac.fromReader(new FileReader(riPath.toFile()), RemoteIndex.class);
-            }
-            catch (IOException e)
-            {
-                throw new IORtException(e);
-            }
-        });
+            }));
         
-        drive = CachingSupplier.wrap(() -> getDrive());
+        drive = CachingSupplier.wrap(Try.uncheck(() -> makeDrive()));
         this.simulation = simulation;
     }
 
@@ -104,15 +99,11 @@ public class Driver
             Files.createDirectories(riPath);
         else if(!Files.isDirectory(riPath))
             throw new IllegalStateException("The path '" + riPath + "' must be a directory.");
-        this.ri = CachingSupplier.wrap(() -> {   try
+        this.ri = CachingSupplier.wrap(Try.uncheck(() -> 
                             {
                                 Entry<Long, String> pair = getLargestChangeIdAndRootFolderId();
                                 return new RemoteIndex(pair.getKey(), pair.getValue());
-                            }
-                            catch (IOException e)
-                            {
-                                throw new IORtException(e);
-                            }});
+                            }));
         this.simulation = simulation;
     }
 
@@ -121,7 +112,7 @@ public class Driver
         return home;
     }
     
-    public RemoteIndex getRemoteIndex()
+    public RemoteIndex getRemoteIndex() throws IOException
     {
         return ri.get();
     }
@@ -148,24 +139,13 @@ public class Driver
         return new RemoteChanges(stream, id);
     }
 
-    private Drive getDrive() throws IORtException
+    private Drive makeDrive() throws IOException, GeneralSecurityException
     {
-        try
-        {
-            HttpTransport httpTransport = GoogleNetHttpTransport.newTrustedTransport();
-            CredHelper credHelper = new CredHelper(jgdrive(), httpTransport, jfac);
-            Credential cred = credHelper.get()
-                                .orElseThrow(() -> new IOException("Did not find credentials from " + jgdrive()));
-            return new Drive.Builder(httpTransport, jfac,  cred).setApplicationName(appName).build();
-        }
-        catch(GeneralSecurityException ge)
-        {
-           throw new RuntimeException(ge); 
-        }
-        catch(IOException io)
-        {
-            throw new IORtException(io);
-        }
+        HttpTransport httpTransport = GoogleNetHttpTransport.newTrustedTransport();
+        CredHelper credHelper = new CredHelper(jgdrive(), httpTransport, jfac);
+        Credential cred = credHelper.get()
+                            .orElseThrow(() -> new IOException("Did not find credentials from " + jgdrive()));
+        return new Drive.Builder(httpTransport, jfac,  cred).setApplicationName(appName).build();
     }
 
     public void saveRemoteIndex() throws IOException
@@ -206,94 +186,61 @@ public class Driver
                      .map(p -> home.relativize(p)));
     }
     
-    public Stream<Entry<File, Path>> downloadByFileIds(Stream<String> fileIds) throws IORtException, IOException
+    public Stream<Entry<File, Path>> downloadByFileIds(Stream<String> fileIds) throws IOException
     {
         ArrayList<File> res = new ArrayList<>(); 
         BatchRequest batch = drive.get().batch();
-        final Callback<File> cb = new Callback<File>()
-        {
-            @Override
-            public void onSuccess(File t, HttpHeaders responseHeaders) throws IOException
-            {
-                res.add(t);
-            }
-        };
+        final Callback<File> cb = Callback.make((f,h) -> res.add(f));
         
-        try
-        {
-            com.google.api.services.drive.Drive.Files files = drive.get().files();
-            fileIds.forEach(f -> {
-                try
-                {
-                    batch.queue(files.get(f).setFields(FILE_ATTRS).buildHttpRequest(), File.class, GoogleJsonError.class, cb);
-                }
-                catch(IOException io)
-                {
-                    throw new IORtException(io);
-                }
-            });
-            if(batch.size() > 0) batch.execute();
-        }
-        catch (IORtException io)
-        {
-            throw (IOException)io.getCause();
-        }
+        com.google.api.services.drive.Drive.Files files = drive.get().files();
+        fileIds.forEach(Try.uncheck(f -> 
+            batch.queue(files.get(f).setFields(FILE_ATTRS).buildHttpRequest(), File.class, GoogleJsonError.class, cb)));
+        if(batch.size() > 0) batch.execute();
         
         return Stream.concat(
                 res.stream().filter(f -> f.getMimeType().equals(MIME_TYPE_DIR)).map(f -> new SimpleImmutableEntry<>(f, null)),
                 downloadFiles(res.stream().filter(f -> !f.getMimeType().equals(MIME_TYPE_DIR))));
     }
     
-    public Stream<Entry<File, Path>> downloadFiles(Stream<File> files) throws IORtException
+    public Stream<Entry<File, Path>> downloadFiles(Stream<File> files) throws IOException
     {
         return 
-        files.map(f ->  {try
-                         {
-                            Path path = Files.createTempFile("jgdrive-", "-" + f.getId() + "-" + f.getTitle());
-                            log.fine("Downloading " + f.getId() + " to " + path + " ....");
-                            // uses alt=media query parameter to request content
-                            ChecksumInputStream remStream = new ChecksumInputStream(drive.get().files().get(f.getId()).executeMediaAsInputStream());
-                            long size = Files.copy(remStream, path, StandardCopyOption.REPLACE_EXISTING);
-                            remStream.close();
-                            if(!f.getMd5Checksum().equals(remStream.getHexChecksum()))
-                                throw new RuntimeException("Checksum verification failed for " 
-                                            + "id=" + f.getId() + ", title=" + f.getTitle() + ", expected=" + f.getMd5Checksum() + ", actual=" + remStream.getHexChecksum());
-                            Files.setLastModifiedTime(path, FileTime.fromMillis(f.getModifiedDate().getValue()));
-                            log.fine("Downloaded " + f.getId() + " to " + path + ", size=" + size + " bytes");
-                            return new SimpleImmutableEntry<>(f, path);
-                         }
-                         catch (IOException e)
-                         {
-                             throw new IORtException(e);
-                         }});
+        files.map(Try.uncheckFunction(f ->  
+             {
+                Path path = Files.createTempFile("jgdrive-", "-" + f.getId() + "-" + f.getTitle());
+                log.fine("Downloading " + f.getId() + " to " + path + " ....");
+                // uses alt=media query parameter to request content
+                ChecksumInputStream remStream = new ChecksumInputStream(drive.get().files().get(f.getId()).executeMediaAsInputStream());
+                long size = Files.copy(remStream, path, StandardCopyOption.REPLACE_EXISTING);
+                remStream.close();
+                if(!f.getMd5Checksum().equals(remStream.getHexChecksum()))
+                    throw new IOException("Checksum verification failed for " 
+                                + "id=" + f.getId() + ", title=" + f.getTitle() + ", expected=" + f.getMd5Checksum() + ", actual=" + remStream.getHexChecksum());
+                Files.setLastModifiedTime(path, FileTime.fromMillis(f.getModifiedDate().getValue()));
+                log.fine("Downloaded " + f.getId() + " to " + path + ", size=" + size + " bytes");
+                return new SimpleImmutableEntry<>(f, path);
+             }));
     }    
     
-    public void updateFile(String fileId, Path localPath) throws IORtException
+    public void updateFile(String fileId, Path localPath) throws IOException
     {
-        try
+        info("Updating remote '" + localPath + "'", " with id = " + fileId);
+        if(!simulation)
         {
-            info("Updating remote '" + localPath + "'", " with id = " + fileId);
-            if(!simulation)
-            {
-                ChecksumInputStream fileStream = new ChecksumInputStream(Files.newInputStream(localPath, StandardOpenOption.READ));
-                InputStreamContent mediaContent = new InputStreamContent(mime(localPath), fileStream);
-                // Send the request to the API.
-                File file = drive.get().files().update(fileId, null, mediaContent).setFields(FILE_ATTRS).execute();
-                if(!fileStream.getHexChecksum().equalsIgnoreCase(file.getMd5Checksum()))
-                    throw new IOException("Failed to verify md5 checksum for id=" + file.getId() + ", path=" + localPath
-                                        + ", expected=" + fileStream.getHexChecksum() + ", found=" + file.getMd5Checksum());
-            }
-        }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
+            ChecksumInputStream fileStream = new ChecksumInputStream(Files.newInputStream(localPath, StandardOpenOption.READ));
+            InputStreamContent mediaContent = new InputStreamContent(mime(localPath), fileStream);
+            // Send the request to the API.
+            File file = drive.get().files().update(fileId, null, mediaContent).setFields(FILE_ATTRS).execute();
+            if(!fileStream.getHexChecksum().equalsIgnoreCase(file.getMd5Checksum()))
+                throw new IOException("Failed to verify md5 checksum for id=" + file.getId() + ", path=" + localPath
+                                    + ", expected=" + fileStream.getHexChecksum() + ", found=" + file.getMd5Checksum());
         }
     }
     
-    public Map<Path, File> mkdirs(Stream<Path> newDirs, Function<Path, Optional<String>> pathParentIdMap) throws IORtException
+    public Map<Path, File> mkdirs(Stream<Path> newDirs, Function<Path, Optional<String>> pathParentIdMap) throws IOException
     {
         LinkedHashMap<Path, File> pathFileMap = new LinkedHashMap<>();
-        newDirs.sorted(Comparator.naturalOrder()).forEach(localDir ->
+        newDirs.sorted(Comparator.naturalOrder()).forEach(Try.uncheck(localDir ->
         {
             // File's metadata.
             File body = new File();
@@ -309,22 +256,17 @@ public class Driver
     
             info("Adding remote '" + localDir + "'", " with parent " + body.getParents());
             if(!simulation)
-            try
             {
                 body = drive.get().files().insert(body).setFields(FILE_ATTRS).execute();
-            }
-            catch (IOException e)
-            {
-                throw new IORtException(e);
             }
             else
                 body.setId(String.valueOf(new Random().nextInt()));
             pathFileMap.put(localDir, body);
-        });
+        }));
         return pathFileMap;
     }
     
-    public File insertFile(Path localPath, String parentId) throws IORtException
+    public File insertFile(Path localPath, String parentId) throws IOException
     {
         // File's metadata.
         File body = new File();
@@ -339,19 +281,14 @@ public class Driver
         info("Adding remote '" + localPath + "'", " with parent " + body.getParents());
         
         if(!simulation)
-        try
         {
             ChecksumInputStream fileStream = new ChecksumInputStream(Files.newInputStream(localPath, StandardOpenOption.READ));
             InputStreamContent mediaContent = new InputStreamContent(body.getMimeType(), fileStream);
             File file = drive.get().files().insert(body, mediaContent).setFields(FILE_ATTRS).execute();
             if(!fileStream.getHexChecksum().equalsIgnoreCase(file.getMd5Checksum()))
-                throw new IORtException("Failed to verify md5 checksum for id=" + file.getId() + ", path=" + localPath
+                throw new IOException("Failed to verify md5 checksum for id=" + file.getId() + ", path=" + localPath
                                     + ", expected=" + fileStream.getHexChecksum() + ", found=" + file.getMd5Checksum());
             return file;
-        }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
         }
         else
             return body.setId(String.valueOf(new Random().nextInt()));
@@ -360,24 +297,14 @@ public class Driver
     public void trashFiles(Stream<String> fileIds) throws IOException
     {
         BatchRequest batch = drive.get().batch();
-        final Callback<File> cb = new Callback<File>()
-        {
-            @Override
-            public void onSuccess(File t, HttpHeaders responseHeaders)
-            {
-            }
-        };
+        final Callback<File> cb = Callback.make((f,h) -> {});
         
         com.google.api.services.drive.Drive.Files files = drive.get().files();
-        fileIds.forEach(fileId -> {try
+        fileIds.forEach(Try.uncheck(fileId -> 
         {
             log.info("Trashing remote '" + fileId + "'");
             batch.queue(files.trash(fileId).setFields(FILE_ATTRS).buildHttpRequest(), File.class, GoogleJsonError.class, cb);
-        }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
-        }});
+        }));
         if(!simulation && batch.size() > 0) batch.execute();
     }
     
@@ -419,20 +346,13 @@ public class Driver
             Iterator<File> it = null;
             
             @Override
-            public boolean tryAdvance(Consumer<? super File> action)
+            public boolean tryAdvance(Consumer<? super File> action) //throws IOException
             {
                 if(list == null)
                 {
-                    try
-                    {
-                        list = request.execute();
-                    }
-                    catch (IOException e)
-                    {
-                        throw new RuntimeException(e);
-                    }
+                    list = Try.uncheck(() -> request.execute()).get();
                     it = list.getItems().iterator();
-                    System.out.println("Read size=" + list.getItems().size());
+                    log.fine(() -> "getAllDirs() Read size=" + list.getItems().size());
                 }
                 if(it.hasNext())
                 {
@@ -443,12 +363,12 @@ public class Driver
                 {
                     if(list.getNextPageToken() != null && list.getNextPageToken().length() > 0)
                     {
-                        System.out.println("Reading token " + list.getNextPageToken());
+                        log.fine(() -> "getAllDirs() Reading token " + list.getNextPageToken());
                         request.setPageToken(list.getNextPageToken());
                         list = null;
                         return tryAdvance(action);
                     }
-                    System.out.println("..done ");
+                    log.fine("getAllDirs() ..done ");
                     return false;
                 }
             }
@@ -459,34 +379,12 @@ public class Driver
     {
         HashMap<String, File> res = new HashMap<>(); 
         BatchRequest batch = drive.get().batch();
-        final Callback<File> cb = new Callback<File>()
-        {
-            @Override
-            public void onSuccess(File t, HttpHeaders responseHeaders) throws IOException
-            {
-                res.put(t.getId(), t);
-            }
-        };
+        final Callback<File> cb = Callback.make((f,h) -> res.put(f.getId(), f));
         
-        try
-        {
-            com.google.api.services.drive.Drive.Files files = drive.get().files();
-            fileIds.forEach(f -> {
-                try
-                {
-                    batch.queue(files.get(f).setFields(FILE_ATTRS).buildHttpRequest(), File.class, GoogleJsonError.class, cb);
-                }
-                catch(IOException io)
-                {
-                    throw new IORtException(io);
-                }
-            });
-            if(batch.size() > 0) batch.execute();
-        }
-        catch (IORtException io)
-        {
-            throw (IOException)io.getCause();
-        }
+        com.google.api.services.drive.Drive.Files files = drive.get().files();
+        fileIds.forEach(Try.uncheck(f -> 
+            batch.queue(files.get(f).setFields(FILE_ATTRS).buildHttpRequest(), File.class, GoogleJsonError.class, cb)));
+        if(batch.size() > 0) batch.execute();
         return res;
     }
     
@@ -505,32 +403,21 @@ public class Driver
             {       //first request                         or needs another request
                 if(request.getLastResponseHeaders() == null || request.getPageToken() != null)
                 {
-                    action.accept(new Supplier<List<File>>()
-                        {
-                            @Override
-                            public List<File> get()
-                            {
-                                try
+                    action.accept(Try.uncheck(() -> 
                                 {
                                     FileList list = request.execute();
                                     if(list.getNextPageToken() != null && list.getNextPageToken().length() > 0)
                                     {
-                                        log.fine("Reading token " + list.getNextPageToken());
+                                        log.fine(() -> "getAllFiles() Reading token " + list.getNextPageToken());
                                         request.setPageToken(list.getNextPageToken());
                                     }
                                     else
                                     {
                                         request.setPageToken(null);
-                                        log.fine("..done reading all tokens");
+                                        log.fine("getAllFiles() ..done reading all tokens");
                                     }
                                     return list.getItems();
-                                }
-                                catch (IOException e)
-                                {
-                                    throw new RuntimeException(e);
-                                }
-                            }
-                        });
+                                }));
                     return true;
                 }
                 return false;
@@ -541,37 +428,36 @@ public class Driver
     public void patchFiles(Stream<File> files) throws IOException
     {
         BatchRequest batch = drive.get().batch();
-        final Callback<Void> cb = new Callback<Void>()
-        {
-            @Override
-            public void onSuccess(Void t, HttpHeaders responseHeaders) throws IOException
-            {
-            }
-            
-        };
+        final Callback<Void> cb = Callback.make((v,h) -> {});
 
         com.google.api.services.drive.Drive.Files dfiles = drive.get().files();
-        files.forEach(f -> {
-            try
+        files.forEach(Try.uncheck(f -> 
             {
                 log.info("Updating remote meta-data of '" + f.getId() + "'");
                 batch.queue(dfiles.patch(f.getId(), f).setFields(FILE_ATTRS).buildHttpRequest(), Void.class, GoogleJsonError.class, cb);
-            }
-            catch (IOException e)
-            {
-                throw new IORtException(e);
-            }
-        });
+            }));
         if(!simulation && batch.size() > 0) batch.execute();
     }
     
-    private static abstract class Callback<T> implements BatchCallback<T, GoogleJsonError> 
+    private interface Callback<T> extends BatchCallback<T, GoogleJsonError> 
     {
         @Override
-        public void onFailure(GoogleJsonError e, HttpHeaders responseHeaders) throws IOException
+        default void onFailure(GoogleJsonError e, HttpHeaders responseHeaders) throws IOException
         {
             throw new HttpResponseException.Builder(e.getCode(), e.getMessage(), responseHeaders)
                                                                         .setContent(e.toPrettyString()).build();
+        }
+        
+        public static <T> Callback<T> make(BiConsumer<T, HttpHeaders> func)
+        {
+            return new Callback<T>()
+            {
+                @Override
+                public void onSuccess(T t, HttpHeaders responseHeaders)
+                {
+                    func.accept(t, responseHeaders);
+                }
+            };
         }
     }
     
@@ -589,20 +475,13 @@ public class Driver
     
     private Supplier<HashSet<String>> makeLocalIndex()
     {
-       return CachingSupplier.wrap(() -> {
-            try
-            {
+       return CachingSupplier.wrap(Try.uncheck(() -> {
                 Path riPath = liPath();
                 if (!Files.exists(riPath))
                     return new HashSet<>();
                 log.fine("Reading local index from " + riPath);
                 return jfac.fromReader(new FileReader(riPath.toFile()), HashSet.class);
-            }
-            catch (IOException e)
-            {
-                throw new IORtException(e);
-            }
-        });
+        }));
     }
 
     public void saveLocalChanges(Set<Path> locs) throws IOException

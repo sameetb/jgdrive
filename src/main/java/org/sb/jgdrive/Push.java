@@ -41,7 +41,8 @@ public class Push implements Cmd
             {
                 log.info("Pushing local changes to drive");
                 Map<Path, String> modifiedFiles = lc.getModifiedFiles();
-                modifiedFiles.entrySet().stream().parallel().forEach(e -> driver.updateFile(e.getValue(), home.resolve(e.getKey())));
+                modifiedFiles.entrySet().stream().parallel()
+                    .forEach(Try.uncheck(e -> driver.updateFile(e.getValue(), home.resolve(e.getKey()))));
 
                 driver.clearLocalChanges();
                 
@@ -71,9 +72,9 @@ public class Push implements Cmd
                         return f;
                     }));
                 
-                newFiles.stream().parallel().forEach(p -> 
+                newFiles.stream().parallel().forEach(Try.uncheck(p -> 
                         newPathFileMap.put(p, driver.insertFile(home.resolve(p), p.getParent() != null ? 
-                                pathParentIdMap.get(p).orElseGet(() -> newPathFileMap.get(p.getParent()).getId()) : null)));
+                                pathParentIdMap.get(p).orElseGet(() -> newPathFileMap.get(p.getParent()).getId()) : null))));
                 
                 driver.trashFiles(deletedPaths.values().stream());
                 ri.removePaths(deletedPaths.keySet().stream());

@@ -27,7 +27,8 @@ public class Reset implements Cmd
                                        .collect(Collectors.toMap(e -> e.getKey().getId(), e -> e.getValue()));
         
         log.fine("Resetting files ...");
-        Stream.of(modifiedFiles.entrySet(), deletedPaths.entrySet()).flatMap(es -> es.stream()).forEach(e -> 
+        Stream.of(modifiedFiles.entrySet(), deletedPaths.entrySet()).flatMap(es -> es.stream()).forEach(
+            Try.uncheck(e -> 
             {
                 Path tmpSrc = resetFiles.get(e.getValue());
                 if(tmpSrc == null) //it is a dir
@@ -35,58 +36,39 @@ public class Reset implements Cmd
                 else
                     moveFile(tmpSrc, home.resolve(e.getKey()));
                 
-            });
+            }));
         driver.clearLocalChanges();
         
-        lc.getMovedFilesFromTo().entrySet().stream().forEach(e -> moveFile(home.resolve(e.getValue()), home.resolve(e.getKey().getKey())));
+        lc.getMovedFilesFromTo().entrySet().stream().forEach(
+                Try.uncheck(e -> moveFile(home.resolve(e.getValue()), home.resolve(e.getKey().getKey()))));
         
-        lc.getNewFiles().stream().map(p -> home.resolve(p)).forEach(p -> {
-            try
-            {
+        lc.getNewFiles().stream().map(p -> home.resolve(p)).forEach(Try.uncheck(p -> 
+        {
                 log.info("Deleting '" + p + "'");
                 Files.deleteIfExists(p);
-            }
-            catch(IOException e)
-            {
-                throw new IORtException(e);
-            }
-        });
+        }));
     }
     
-    private void moveFile(Path tmpPath, Path lp)
+    private void moveFile(Path tmpPath, Path lp) throws IOException
     {
-        try
+        Path parent = lp.getParent();
+        if(Files.notExists(parent))
         {
-            Path parent = lp.getParent();
-            if(Files.notExists(parent))
-            {
-                log.info("Restoring '" + parent + "'");
-                Files.createDirectories(parent);
-            }
-            log.info("Restoring '" + lp + "'");
-            Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
+            log.info("Restoring '" + parent + "'");
+            Files.createDirectories(parent);
         }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
-        }
+        log.info("Restoring '" + lp + "'");
+        Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
     }
     
-    private boolean createDir(Path p)
+    private boolean createDir(Path p) throws IOException
     {
-        try
+        if(!Files.exists(p, LinkOption.NOFOLLOW_LINKS))
         {
-            if(!Files.exists(p, LinkOption.NOFOLLOW_LINKS))
-            {
-                log.info("Restoring '" + p + "'");
-                Files.createDirectories(p);
-                return true;
-            }
-            return false;
+            log.info("Restoring '" + p + "'");
+            Files.createDirectories(p);
+            return true;
         }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
-        }
+        return false;
     }    
 }

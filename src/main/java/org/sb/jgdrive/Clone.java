@@ -22,37 +22,31 @@ public class Clone
     public Clone(Path home, boolean simulation) throws IOException, IllegalStateException
     {
         CredHelper credHelper = CredHelper.makeCredHelper(home);
-        Credential cred = credHelper.get().orElseGet(() -> {
-                                                            try
-                                                            {
-                                                                return credHelper.authorize();
-                                                            }
-                                                            catch(IOException io)
-                                                            {
-                                                                throw new IORtException(io);
-                                                            }
-                                                        });
+        Try<Credential, IOException> cred = credHelper.get().map(ch -> Try.success(ch, IOException.class))
+                        .orElseGet(Try.wrap(() -> credHelper.authorize(), IOException.class));
+        
         driver = new Driver(home, new Drive.Builder(credHelper.httpTransport, 
-                                    credHelper.jfac, cred).setApplicationName(Driver.appName).build(), simulation);
+                                    credHelper.jfac, cred.orElseThrow()).setApplicationName(Driver.appName).build(), simulation);
     }
     
     public void exec(final List<String> opts) throws IOException
     {
-        final boolean isDown = !opts.contains("no-download");
+        final boolean noDown = !opts.contains("no-download");
 
         Path home = driver.getHome();
         
         RemoteIndex ri = driver.getRemoteIndex();
         ri.add(driver.getAllDirs());
         
-        driver.getAllFiles().forEach(s -> 
+        driver.getAllFiles().forEach(Try.uncheck(s -> 
         {
             List<File> files = s.get();
             Map<File, Path> mapPath = ri.add(files.stream());
-            if(isDown) 
+            if(noDown) 
                 driver.downloadFiles(files.stream().parallel()).forEach(e -> 
-                    Optional.ofNullable(mapPath.get(e.getKey())).map(dst -> moveFile(e.getValue(), home.resolve(dst))));
-        });
+                    Optional.ofNullable(mapPath.get(e.getKey()))
+                                    .map(Try.uncheckFunction(dst -> moveFile(e.getValue(), home.resolve(dst)))));
+        }));
         
         ri.setLastRevisionId(driver.getLargestChangeId());
         ri.setLastSyncTime();
@@ -60,23 +54,16 @@ public class Clone
         log.info("Cloned to revision: " + ri.getLastRevisionId());
     }
     
-    private static Path moveFile(Path tmpPath, Path lp)
+    private static Path moveFile(Path tmpPath, Path lp) throws IOException
     {
-        try
+        Path parent = lp.getParent();
+        if(Files.notExists(parent))
         {
-            Path parent = lp.getParent();
-            if(Files.notExists(parent))
-            {
-                log.info("created: " + parent);
-                Files.createDirectories(parent);
-            }
-            log.info("created: " + lp);
-            return Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
+            log.info("created: " + parent);
+            Files.createDirectories(parent);
         }
-        catch (IOException e)
-        {
-            throw new IORtException(e);
-        }
+        log.info("created: " + lp);
+        return Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
     }
 
     public Driver getDriver()

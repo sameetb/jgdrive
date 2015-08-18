@@ -89,19 +89,12 @@ class CredHelper
         return Optional.ofNullable(flow.loadCredential(userID));
     }
 
-    Optional<Credential> reauthorize() throws IORtException, IOException
+    Optional<Credential> reauthorize() throws IOException
     {
-        Supplier<String> resp = () -> { 
+        Supplier<String> resp = Try.uncheck(() -> { 
             System.out.println("Please confirm that you want to authenticate again (y/n):");
-            try
-            {
-                return readLine();
-            }
-            catch (IOException e)
-            {
-                throw new IORtException(e);
-            }
-        };
+            return readLine();
+        });
         
         if(Files.notExists(userToken) || resp.get().startsWith("y")) return Optional.of(authorize());
         else 
