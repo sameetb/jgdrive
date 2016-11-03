@@ -32,7 +32,6 @@ public class Push implements Cmd
         ConcurrentHashMap<Path, File> newPathFileMap = new ConcurrentHashMap<Path, File>();
         if(!lc.isEmpty())
         {
-            ri.setLastSyncTime();
             long largestChangeId = driver.getLargestChangeId();
             if(largestChangeId > ri.getLastRevisionId())
                 throw new IllegalStateException("Remote revision is at: " + largestChangeId + ", local still at: " 
@@ -45,6 +44,7 @@ public class Push implements Cmd
                     .forEach(Try.uncheck(e -> driver.updateFile(e.getValue(), home.resolve(e.getKey()))));
 
                 driver.clearLocalChanges();
+                ri.setLastSyncTime();
                 
                 Set<Path> newFiles = lc.getNewFiles();
                 Map<Path, String> deletedPaths = lc.getDeletedPaths();
@@ -71,13 +71,17 @@ public class Push implements Cmd
                                         pathParentIdMap.get(to).orElseGet(() -> newPathFileMap.get(to.getParent()).getId()))));
                         return f;
                     }));
+                ri.setLastSyncTime();
                 
                 newFiles.stream().parallel().forEach(Try.uncheck(p -> 
                         newPathFileMap.put(p, driver.insertFile(home.resolve(p), p.getParent() != null ? 
                                 pathParentIdMap.get(p).orElseGet(() -> newPathFileMap.get(p.getParent()).getId()) : null))));
                 
+                ri.setLastSyncTime();
+                
                 driver.trashFiles(deletedPaths.values().stream());
                 ri.removePaths(deletedPaths.keySet().stream());
+                ri.setLastSyncTime();
                 
             }
             finally

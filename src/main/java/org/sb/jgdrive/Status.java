@@ -34,6 +34,7 @@ public class Status implements Cmd
         
         if(!opts.contains("local-only"))
         {
+            log.info("Remote repository at change-id " + driver.getLargestChangeId());
             boolean full = opts.contains("full");
             Map<String, String> nvpFlags = Cmd.nvpFlags(opts.stream());
             long revisionId = Optional.ofNullable(nvpFlags.get("revision")).map(str -> Long.parseLong(str)).orElseGet(() -> ri.getLastRevisionId());

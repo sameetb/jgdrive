@@ -106,9 +106,7 @@ class CredHelper
     
     private static String readLine() throws IOException
     {
-        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
-        String code = br.readLine();
-        br.close();
+        String code = System.console().readLine();
         return code != null ? code.trim() : "";
     }
 

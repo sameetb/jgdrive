@@ -1,7 +1,9 @@
 package org.sb.jgdrive;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.StringWriter;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.AbstractMap.SimpleImmutableEntry;
@@ -12,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.logging.Level;
@@ -50,11 +53,11 @@ public class Main
             help();
             return;
         }
-        initLogging(boolFlags.contains("debug"));
+        initLogging(boolFlags.contains("debug"), boolFlags.contains("debug-all"));
         
         final boolean simulation = boolFlags.contains("simulation");
         
-        if(simulation) log.get().info("Running in simulation mode, no changes will be on remote drive.");
+        if(simulation) log.get().info("Running in simulation mode, no changes will be made on remote drive.");
         
         Map<String, String>  nvpFlags = Cmd.nvpFlags(flags.stream());
         final Path home = Optional.ofNullable(nvpFlags.get("home")).map(p -> Paths.get(p).toAbsolutePath())
@@ -94,6 +97,7 @@ public class Main
                 "\t\t\tif not specified, the current directory is assumed to be the home.",
                 "\t--simulation\tDry run, no changes will be made on remote drive.",
                 "\t--debug\t application logs  at 'fine' verbosity level",
+                "\t--debug-all\t everything logs  at 'fine' verbosity level to the $HOME/.jgdrive.log file",
                 "",
                 "If no commands are specified, it defaults to 'pull push'.",
                 "",
@@ -131,15 +135,32 @@ public class Main
         }
     }
     
-    private static void initLogging(boolean debug) throws IOException
+    private static void initLogging(boolean debug, boolean debugAll) throws IOException
     {
         InputStream props;
         if(System.getProperty("java.util.logging.config.file") == null &&
                 (props = Main.class.getClassLoader().getResourceAsStream("logging.properties")) != null)
         {
+            if(debugAll)
+            {
+                Properties p = new Properties();
+                p.load(props);
+                p.setProperty(".level", Level.FINE.getName());
+                p.setProperty("handlers", Optional.ofNullable(p.getProperty("handlers")).map(h -> h + ",").orElse("")
+                                                                        + "java.util.logging.FileHandler");
+                p.setProperty("java.util.logging.FileHandler.formatter", "java.util.logging.SimpleFormatter");
+                p.setProperty("java.util.logging.FileHandler.pattern", "%h/.jgdrive.log");
+                p.setProperty("java.util.logging.FileHandler.append", "true");
+                p.setProperty("java.util.logging.ConsoleHandler.level", Level.INFO.getName());
+                props.close();
+                StringWriter sw = new StringWriter();
+                p.store(sw, "");
+                props = new ByteArrayInputStream(sw.toString().getBytes());
+            }
             LogManager.getLogManager().readConfiguration(props);
-            if(debug)
+            if(debug | debugAll)
                 log.get().setLevel(Level.FINE);
+            props.close();
         }
         else
             System.err.println("Java logging config system property is set or could not find 'logging.properties' on classpath");
