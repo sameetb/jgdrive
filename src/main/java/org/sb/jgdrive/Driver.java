@@ -336,11 +336,17 @@ public class Driver
     
     public Stream<File> getAllDirs() throws IOException
     {
+        return getAllDirs(Optional.empty());
+    }
+    
+    public Stream<File> getAllDirs(Optional<String> nameMatch) throws IOException
+    {
         return StreamSupport.stream(
         new Spliterators.AbstractSpliterator<File>(Long.MAX_VALUE, Spliterator.SIZED)
         {
             final Drive.Files.List request = drive.get().files().list()
-                    .setQ("trashed = false and 'me' in owners and mimeType = '" + MIME_TYPE_DIR + "'")
+                    .setQ("trashed = false and 'me' in owners and mimeType = '" + MIME_TYPE_DIR  + "'"
+                                  + nameMatch.map(nm -> " and name contains '" + nm + "'").orElse(""))
                     .setFields("nextPageToken,items(" + FILE_ATTRS + ")").setMaxResults(400);
             FileList list = null;
             Iterator<File> it = null;

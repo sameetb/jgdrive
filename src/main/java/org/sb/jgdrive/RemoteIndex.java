@@ -279,8 +279,7 @@ public class RemoteIndex
     {
         Node t = tree.get();
         return paths.map(p -> new SimpleImmutableEntry<>(t.find(p.getParent()), p.getFileName().toString()))
-             .filter(sie -> sie.getKey().isPresent())
-             .map(sie -> new SimpleImmutableEntry<>(sie.getKey().get(), sie.getValue()))
+             .map(sie -> new SimpleImmutableEntry<>(sie.getKey().orElse(t), sie.getValue()))
              .map(sie -> sie.getKey().removeByTitle(sie.getValue()).<String>map(n -> n.id))
              .collect(Collectors.toList());
     }
@@ -403,6 +402,7 @@ public class RemoteIndex
 
         boolean remove(Node match)
         {
+            log.fine("Removing node "  + match);
             return getEntries().map(e -> e.remove(match)).orElse(false);
         }
 
