@@ -25,10 +25,11 @@ import java.util.stream.Stream;
 public class Main
 {
     private static Supplier<Logger> log = CachingSupplier.wrap(() -> Logger.getLogger(Main.class.getPackage().getName()));
-    private static final String[] cmds = {"clone", "pull", "push", "status", "reset", "login", "info"};
+    private static final String[] cmds = {"clone", "pull", "push", "status", "reset", "login", "info", "index"};
     
     public static void main(String[] args)
     {
+    	int exit = 0;
         try
         {
             exec(args);
@@ -36,9 +37,10 @@ public class Main
         catch(Exception io)
         {
             log.get().log(Level.SEVERE, "", io);
+            exit = -1;
         }   
         LogManager.getLogManager().reset();
-        System.exit(-1);
+        System.exit(exit);
     }
     
     public static void exec(String[] args) throws Exception

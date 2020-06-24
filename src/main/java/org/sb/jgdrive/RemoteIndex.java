@@ -210,7 +210,7 @@ public class RemoteIndex
                     }
                 });
          if(!remNodes.isEmpty())
-            throw new RuntimeException("Could not resolve hierarchy for " + remNodes);
+            log.severe("Could not resolve hierarchy for " + remNodes);
 
          existingFiles.forEach(e -> {
              Node match = e.getValue().getKey();

@@ -3,6 +3,7 @@ package org.sb.jgdrive;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
 import java.util.Spliterator;
@@ -42,6 +44,8 @@ import com.google.api.client.googleapis.batch.BatchRequest;
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
 import com.google.api.client.googleapis.json.GoogleJsonError;
 import com.google.api.client.http.HttpHeaders;
+import com.google.api.client.http.HttpRequest;
+import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.InputStreamContent;
@@ -69,7 +73,9 @@ public class Driver
     private final Supplier<Drive> drive;
     private final Supplier<HashSet<String>> li = makeLocalIndex();
     private final boolean simulation;
-    private final Supplier<Pattern[]> ignores = CachingSupplier.wrap(() -> readIgnores().map(Pattern::compile).toArray(Pattern[]::new));
+    private final Supplier<Pattern[]> ignores = CachingSupplier.wrap(() -> pat(readIgnores("ignore.txt", "^\\.~.*#$", "^~\\$.*")));
+    private final Supplier<Pattern[]> remIgnores = CachingSupplier.wrap(() -> pat(readIgnores("remote_ignore.txt")));
+    private final Supplier<Optional<Properties>> opts = CachingSupplier.wrap(() -> readOpts());
     
     public Driver(Path home, boolean simulation) throws IllegalStateException, IOException
     {
@@ -131,8 +137,10 @@ public class Driver
             ChangeList changes = list.execute();
             if(id == null) id = changes.getLargestChangeId();
             stream = Stream.concat(stream, changes.getItems().stream()
-                        .filter(ch -> modifiedDtm.map(dt -> ch.getFile().getModifiedDate().getValue() > dt.toMillis()).orElse(true)));
+                        .filter(ch ->  ch.getFile() == null || 
+                         			   modifiedDtm.map(dt -> ch.getFile().getModifiedDate().getValue() > dt.toMillis()).orElse(true)));
             list.setPageToken(changes.getNextPageToken());
+        	info("Retrieved remote changes: " + id, list.getPageToken());
         }
         while(list.getPageToken() != null && list.getPageToken().length() > 0);
         
@@ -145,10 +153,24 @@ public class Driver
         CredHelper credHelper = new CredHelper(jgdrive(), httpTransport, jfac);
         Credential cred = credHelper.get()
                             .orElseThrow(() -> new IOException("Did not find credentials from " + jgdrive()));
-        return new Drive.Builder(httpTransport, jfac,  cred).setApplicationName(appName).build();
+        return new Drive.Builder(httpTransport, jfac,  withOpts(cred)).setApplicationName(appName).build();
     }
 
-    public void saveRemoteIndex() throws IOException
+    private HttpRequestInitializer withOpts(Credential cred) {
+		return new HttpRequestInitializer() {
+			
+			@Override
+			public void initialize(HttpRequest request) throws IOException {
+				opt("http.connectTimeOutMillis", Integer::parseInt)
+					.ifPresent(request::setConnectTimeout);;
+				opt("http.readTimeOutMillis", Integer::parseInt)
+					.ifPresent(request::setReadTimeout);
+				cred.initialize(request);
+			}
+		};
+	}
+
+	public void saveRemoteIndex() throws IOException
     {
         if(!simulation)
         {
@@ -180,7 +202,9 @@ public class Driver
         return Stream.concat(li.get().stream().map(s -> Paths.get(s)), 
                 Files.find(home, Integer.MAX_VALUE, 
                     (p, a) -> !p.startsWith(idxDir) 
-                                && Stream.of(igns).noneMatch(pat -> pat.asPredicate().test(p.getFileName().toString()))
+                                && Stream.of(igns).map(Pattern::asPredicate)
+                                				.noneMatch(pr -> pr.test(p.getFileName().toString())
+                                									|| pr.test(home.relativize(p).toString()))
                                 && a.isRegularFile()
                                 && (a.lastModifiedTime().compareTo(lastSyncTime) > 0 || !idx.exists(home.relativize(p))))
                      .map(p -> home.relativize(p)));
@@ -205,7 +229,9 @@ public class Driver
     public Stream<Entry<File, Path>> downloadFiles(Stream<File> files) throws IOException
     {
         return 
-        files.map(Try.uncheckFunction(f ->  
+        files
+        	.filter(f -> !needsExport(f))
+        	.map(Try.uncheckFunction(f ->  
              {
                 Path path = Files.createTempFile("jgdrive-", "-" + f.getId() + "-" + f.getTitle());
                 log.fine("Downloading " + f.getId() + " to " + path + " ....");
@@ -222,7 +248,7 @@ public class Driver
              }));
     }    
     
-    public void updateFile(String fileId, Path localPath) throws IOException
+	public void updateFile(String fileId, Path localPath) throws IOException
     {
         info("Updating remote '" + localPath + "'", " with id = " + fileId);
         if(!simulation)
@@ -515,10 +541,10 @@ public class Driver
         }
     }
     
-    private Stream<String> readIgnores()
+    private Stream<String> readIgnores(String fileNm, String... dflts)
     {
         Path jgdrive = jgdrive();
-        Path ignPath = jgdrive.resolve("ignore.txt");
+        Path ignPath = jgdrive.resolve(fileNm);
         if (Files.exists(ignPath))
             try
             {
@@ -528,6 +554,43 @@ public class Driver
             {
                 log.log(Level.WARNING, "Failed to read ignores file " + ignPath, e);
             }
-        return Stream.of("^\\.~.*#$", "^~\\$.*");
+        return Stream.of(dflts);
     }
+    
+    private Pattern[] pat(Stream<String> pats)
+    {
+    	return pats.map(Pattern::compile).toArray(Pattern[]::new);
+    }
+    
+    private Optional<Properties> readOpts()
+    {
+        Path jgdrive = jgdrive();
+        Path ignPath = jgdrive.resolve("opts.properties");
+        if (Files.exists(ignPath))
+            try(InputStream is = Files.newInputStream(ignPath, StandardOpenOption.READ))
+            {
+            	Properties props = new Properties();
+            	props.load(is);
+                return Optional.of(props);
+            }
+            catch (IOException e)
+            {
+                log.log(Level.WARNING, "Failed to read ignores file " + ignPath, e);
+            }
+        return Optional.empty();
+    }
+    
+    private <T> Optional<T> opt(String name, Function<String, T> to)
+    {
+    	return opts.get().flatMap(p -> Optional.ofNullable(p.getProperty(name))).map(to);
+    }
+
+	Supplier<Pattern[]> getRemIgnores() 
+	{
+		return remIgnores;
+	}
+	
+    private boolean needsExport(File f) {
+    	return RemoteChanges.needsExport(f);
+	}
 }
