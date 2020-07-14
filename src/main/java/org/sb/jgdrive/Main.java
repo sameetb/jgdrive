@@ -145,6 +145,7 @@ public class Main
         {
             if(debugAll)
             {
+            	System.err.println("Running with --debug-all, debug stuff going to $HOME/.jgdrive.log");
                 Properties p = new Properties();
                 p.load(props);
                 p.setProperty(".level", Level.FINE.getName());

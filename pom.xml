@@ -8,8 +8,8 @@
     <dependency>
       <groupId>com.google.apis</groupId>
       <artifactId>google-api-services-drive</artifactId>
-      <version>v2-rev168-1.20.0</version>
-      <!-- version>v2-rev332-1.25.0</version -->
+      <!-- version>v2-rev168-1.20.0</version -->
+      <version>v2-rev393-1.25.0</version>
     </dependency>
     <dependency>
         <groupId>junit</groupId>
