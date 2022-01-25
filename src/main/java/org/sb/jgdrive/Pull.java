@@ -151,6 +151,7 @@ public class Pull implements Cmd
     private void moveFile(Path tmpPath, Path lp) throws IOException
     {
         log.info("Updating local '" + lp + "'");
+        createDir(lp.getParent());
         Files.move(tmpPath, lp, StandardCopyOption.REPLACE_EXISTING);
     }
 
